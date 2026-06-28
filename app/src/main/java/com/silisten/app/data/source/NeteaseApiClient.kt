@@ -131,10 +131,18 @@ class NeteaseApiClient(
 
     suspend fun createQrLoginCodeLocal(): NeteaseQrLoginCode = withContext(Dispatchers.IO) {
         val keyJson = getJson("/login/qr/key?timestamp=${System.currentTimeMillis()}")
+        Log.d(TAG, "QR key response: $keyJson")
         val key = keyJson.optJSONObject("data")?.optString("unikey").orEmpty()
             .ifBlank { keyJson.optString("unikey").orEmpty() }
-        if (key.isBlank()) error(shortError(keyJson.optString("message", "二维码 key 获取失败")))
+            .ifBlank { keyJson.optJSONObject("data")?.optString("code").orEmpty() }
+        if (key.isBlank()) {
+            val msg = keyJson.optString("message").ifBlank {
+                keyJson.optJSONObject("data")?.optString("message").orEmpty()
+            }.ifBlank { "二维码 key 获取失败" }
+            error(shortError(msg))
+        }
         val qrUrl = "https://music.163.com/login?codekey=$key"
+        Log.d(TAG, "QR URL: $qrUrl")
         NeteaseQrLoginCode(
             key = key,
             qrUrl = qrUrl,
@@ -148,27 +156,58 @@ class NeteaseApiClient(
         val json = runCatching {
             getJson("/login/qr/check?key=${key.encode()}&timestamp=$timestamp")
         }.getOrElse {
-            getJson("/login/qr/check?key=${key.encode()}&noCookie=true&timestamp=$timestamp")
-        }.let { first ->
-            if (first.optInt("code") == 502) {
-                runCatching {
-                    getJson("/login/qr/check?key=${key.encode()}&noCookie=true&timestamp=$timestamp")
-                }.getOrDefault(first)
-            } else {
-                first
+            runCatching {
+                getJson("/login/qr/check?key=${key.encode()}&noCookie=true&timestamp=$timestamp")
+            }.getOrElse { inner ->
+                return@withContext NeteaseQrLoginCheck(
+                    code = -1,
+                    message = shortError(inner.message.orEmpty().ifBlank { "二维码检查网络失败" })
+                )
             }
         }
         val code = json.optInt("code")
+        Log.d(TAG, "QR check response code=$code body=${json.toString().take(200)}")
+        if (code == 502) {
+            val retryJson = runCatching {
+                getJson("/login/qr/check?key=${key.encode()}&noCookie=true&timestamp=${System.currentTimeMillis()}")
+            }.getOrNull()
+            if (retryJson != null && retryJson.optInt("code") != 502) {
+                val retryCode = retryJson.optInt("code")
+                Log.d(TAG, "QR check retry code=$retryCode")
+                if (retryCode == 803) {
+                    retryJson.optString("cookie").takeIf { it.isNotBlank() }?.let {
+                        cookieJar.saveCookieHeader(it, activeHttpUrl())
+                    }
+                    val loginState = runCatching { refreshLoginState() }.getOrElse {
+                        NeteaseLoginState(true, loadUser(), "扫码成功，正在获取用户信息")
+                    }
+                    return@withContext NeteaseQrLoginCheck(retryCode, "登录成功", loginState)
+                }
+                val retryMessage = when (retryCode) {
+                    800 -> "二维码已过期，请重新生成"
+                    801 -> "等待扫码"
+                    802 -> "已扫码，请在手机上确认登录"
+                    else -> retryJson.optString("message", "等待扫码")
+                }
+                return@withContext NeteaseQrLoginCheck(retryCode, retryMessage)
+            }
+            return@withContext NeteaseQrLoginCheck(801, "等待扫码")
+        }
         val message = when (code) {
             800 -> "二维码已过期，请重新生成"
             801 -> "等待扫码"
             802 -> "已扫码，请在手机上确认登录"
             803 -> "登录成功"
-            else -> shortError(json.optString("message", "二维码状态未知：$code"))
+            else -> json.optString("message", "二维码状态未知：$code").let { shortError(it) }
         }
         if (code == 803) {
-            json.optString("cookie").takeIf { it.isNotBlank() }?.let { cookieJar.saveCookieHeader(it, activeHttpUrl()) }
-            return@withContext NeteaseQrLoginCheck(code, message, refreshLoginState())
+            json.optString("cookie").takeIf { it.isNotBlank() }?.let {
+                cookieJar.saveCookieHeader(it, activeHttpUrl())
+            }
+            val loginState = runCatching { refreshLoginState() }.getOrElse {
+                NeteaseLoginState(true, loadUser(), "扫码成功，正在获取用户信息")
+            }
+            return@withContext NeteaseQrLoginCheck(code, message, loginState)
         }
         NeteaseQrLoginCheck(code, message)
     }

@@ -187,13 +187,19 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
 
     init {
         themePreferences.registerOnSharedPreferenceChangeListener(themePreferenceListener)
-        loadFeatured()
-        refreshLoginState()
         viewModelScope.launch {
+            loadFeatured()
+        }
+        viewModelScope.launch {
+            delay(1500)
+            refreshLoginState()
+        }
+        viewModelScope.launch {
+            delay(200)
             while (true) {
                 player.updateProgress()
                 syncLyricsWithPlayback()
-                delay(500)
+                delay(100)
             }
         }
     }
@@ -456,8 +462,18 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
             val userId = accountState.loginState.user?.userId ?: 0L
             val dailyDeferred = async { runCatching { musicRepository.neteaseDailyDiscovery() }.getOrNull() }
             val fmDeferred = async { runCatching { musicRepository.neteasePersonalFm() }.getOrNull() }
-            val podcastsDeferred = async { runCatching { musicRepository.neteasePodcasts() }.getOrNull() }
             val recommendedDeferred = async { runCatching { musicRepository.neteaseRecommendedPlaylists() }.getOrDefault(emptyList()) }
+
+            val daily = dailyDeferred.await()
+            val fm = fmDeferred.await()
+            val recommended = recommendedDeferred.await()
+            uiState = uiState.copy(
+                dailyDiscovery = daily,
+                personalFm = fm,
+                recommendedPlaylists = recommended
+            )
+
+            val podcastsDeferred = async { runCatching { musicRepository.neteasePodcasts() }.getOrNull() }
             val cloudDeferred = async {
                 if (userId == 0L) null else runCatching { musicRepository.neteaseCloudSongs() }.getOrNull()
             }
@@ -472,10 +488,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
             }
             val userPlaylists = userPlaylistsDeferred.await()
             uiState = uiState.copy(
-                dailyDiscovery = dailyDeferred.await(),
-                personalFm = fmDeferred.await(),
                 podcasts = podcastsDeferred.await(),
-                recommendedPlaylists = recommendedDeferred.await(),
                 cloudDrive = cloudDeferred.await(),
                 likedSongs = likedDeferred.await(),
                 likedSongIds = likedSongIdsDeferred.await(),
@@ -636,7 +649,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         qrLoginJob?.cancel()
         qrLoginJob = viewModelScope.launch {
             while (accountState.qrLogin.key == key && !accountState.loginState.loggedIn) {
-                delay(1000)
+                delay(2000)
                 val result = runCatching { accountRepository.checkNeteaseQrLogin(key) }.getOrElse {
                     accountState = accountState.copy(
                         qrLogin = accountState.qrLogin.copy(
@@ -656,6 +669,15 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
                 )
                 when (result.code) {
                     800, 803 -> return@launch
+                    8821 -> {
+                        accountState = accountState.copy(
+                            qrLogin = accountState.qrLogin.copy(
+                                polling = false,
+                                message = "网易云安全风控拦截了第三方扫码登录，请使用短信验证码登录"
+                            )
+                        )
+                        return@launch
+                    }
                 }
                 if (loginState?.loggedIn == true) {
                     loadFeatured()

@@ -63,6 +63,7 @@ dependencies {
     implementation("androidx.media3:media3-session:1.5.1")
     implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("androidx.palette:palette-ktx:1.0.0")
     implementation("com.google.zxing:core:3.5.3")
     implementation("io.github.kyant0:backdrop-android:2.0.0")
     implementation("top.yukonga.miuix.kmp:miuix-blur-android:0.9.2")

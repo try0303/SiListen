@@ -35,6 +35,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -172,6 +173,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
@@ -227,11 +229,17 @@ import com.silisten.app.ui.theme.appBackgroundBrush
 import com.silisten.app.ui.theme.LocalSiListenAppearance
 import com.silisten.app.ui.theme.onAccentColor
 import com.silisten.app.ui.theme.resolveDarkTheme
+import android.graphics.drawable.BitmapDrawable
+import androidx.palette.graphics.Palette
+import coil.ImageLoader
+import coil.request.ImageRequest
+import coil.request.SuccessResult
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.android.awaitFrame
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
@@ -647,7 +655,9 @@ fun SiListenApp(viewModel: SiListenViewModel) {
                 ModalBottomSheet(
                     onDismissRequest = viewModel::closePlayerSheet,
                     sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-                    containerColor = Color(0xFF101312)
+                    containerColor = Color(0xFF0A0A0A),
+                    scrimColor = Color.Black.copy(alpha = 0.42f),
+                    dragHandle = null
                 ) {
                     FullPlayer(
                         playback = viewModel.playbackState,
@@ -5127,6 +5137,389 @@ private fun PlaybackErrorBar(
     }
 }
 
+private enum class PlayerPage { Detail, Lyrics, Queue, Comments }
+
+private val playerPages = PlayerPage.entries.toList()
+
+private fun PlayerSheetPanel.toPlayerPage(): PlayerPage = when (this) {
+    PlayerSheetPanel.Detail -> PlayerPage.Detail
+    PlayerSheetPanel.Queue -> PlayerPage.Queue
+    PlayerSheetPanel.Lyrics -> PlayerPage.Lyrics
+    PlayerSheetPanel.Comments -> PlayerPage.Comments
+}
+
+@Composable
+private fun rememberDynamicPalette(coverUrl: String?): Pair<Color, Color> {
+    val context = LocalContext.current
+    var dominant by remember { mutableStateOf(Color(0xFF1A1A2E)) }
+    var vibrant by remember { mutableStateOf(Color(0xFF16213E)) }
+    LaunchedEffect(coverUrl) {
+        if (coverUrl.isNullOrBlank()) return@LaunchedEffect
+        val loader = ImageLoader(context)
+        val request = ImageRequest.Builder(context)
+            .data(coverUrl)
+            .allowHardware(false)
+            .size(200)
+            .build()
+        val result = runCatching { loader.execute(request) }.getOrNull()
+        val bitmap = (result as? SuccessResult)?.drawable?.let { it as? BitmapDrawable }?.bitmap
+            ?: return@LaunchedEffect
+        val palette = Palette.from(bitmap).generate()
+        palette.dominantSwatch?.rgb?.let { dominant = Color(it) }
+        (palette.vibrantSwatch ?: palette.mutedSwatch)?.rgb?.let { vibrant = Color(it) }
+    }
+    val animDominant by animateColorAsState(
+        targetValue = dominant,
+        animationSpec = tween(800),
+        label = "palette-dominant"
+    )
+    val animVibrant by animateColorAsState(
+        targetValue = vibrant,
+        animationSpec = tween(800),
+        label = "palette-vibrant"
+    )
+    return animDominant to animVibrant
+}
+
+@Composable
+private fun DynamicPlayerBackground(
+    coverUrl: String?,
+    accent: Color,
+    modifier: Modifier = Modifier
+) {
+    val (dominant, vibrant) = rememberDynamicPalette(coverUrl)
+    Box(modifier = modifier) {
+        AsyncImage(
+            model = coverUrl,
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .fillMaxSize()
+                .blur(56.dp)
+                .graphicsLayer {
+                    scaleX = 1.3f
+                    scaleY = 1.3f
+                    alpha = 0.48f
+                }
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            dominant.copy(alpha = 0.92f),
+                            vibrant.copy(alpha = 0.60f),
+                            accent.copy(alpha = 0.30f),
+                            Color(0xFF0A0A0A).copy(alpha = 0.96f)
+                        )
+                    )
+                )
+        )
+    }
+}
+
+@Composable
+private fun PlayerGrabber(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .padding(vertical = 10.dp)
+            .width(36.dp)
+            .height(4.dp)
+            .clip(RoundedCornerShape(999.dp))
+            .background(Color.White.copy(alpha = 0.48f))
+    )
+}
+
+@Composable
+private fun PagerDotIndicator(
+    pageCount: Int,
+    currentPage: Int,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier.padding(vertical = 14.dp),
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        repeat(pageCount) { index ->
+            val selected = index == currentPage
+            val dotAlpha by animateFloatAsState(
+                targetValue = if (selected) 1f else 0.36f,
+                animationSpec = spring(dampingRatio = 0.78f, stiffness = 480f),
+                label = "dot-alpha"
+            )
+            val dotWidth by animateFloatAsState(
+                targetValue = if (selected) 20f else 7f,
+                animationSpec = spring(dampingRatio = 0.72f, stiffness = 520f),
+                label = "dot-width"
+            )
+            Box(
+                modifier = Modifier
+                    .height(7.dp)
+                    .width(dotWidth.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .graphicsLayer { alpha = dotAlpha }
+                    .background(Color.White)
+            )
+        }
+    }
+}
+
+private data class PlayerTabItem(
+    val page: PlayerPage,
+    val label: String,
+    val icon: ImageVector
+)
+
+private val playerTabItems = listOf(
+    PlayerTabItem(PlayerPage.Detail, "唱片", Icons.Rounded.Album),
+    PlayerTabItem(PlayerPage.Lyrics, "歌词", Icons.Rounded.Subtitles),
+    PlayerTabItem(PlayerPage.Queue, "列表", Icons.AutoMirrored.Rounded.QueueMusic),
+    PlayerTabItem(PlayerPage.Comments, "评论", Icons.AutoMirrored.Rounded.Comment)
+)
+
+@Composable
+private fun PlayerTabBar(
+    currentPage: Int,
+    onPageSelect: (Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        color = Color.White.copy(alpha = 0.075f),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.10f)),
+        shape = RoundedCornerShape(28.dp),
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 8.dp)
+            .height(58.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 6.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            playerTabItems.forEachIndexed { index, item ->
+                val selected = index == currentPage
+                val tint by animateColorAsState(
+                    targetValue = if (selected) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.62f),
+                    animationSpec = spring(dampingRatio = 0.78f, stiffness = 480f),
+                    label = "tab-tint"
+                )
+                val bgAlpha by animateFloatAsState(
+                    targetValue = if (selected) 0.14f else 0f,
+                    animationSpec = spring(dampingRatio = 0.78f, stiffness = 480f),
+                    label = "tab-bg"
+                )
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(Color.White.copy(alpha = bgAlpha))
+                        .noRippleClick(shape = RoundedCornerShape(22.dp)) { onPageSelect(index) },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = item.icon,
+                            contentDescription = item.label,
+                            tint = tint,
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Spacer(Modifier.height(3.dp))
+                        Text(
+                            text = item.label,
+                            color = tint,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = if (selected) FontWeight.Black else FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlayerDetailPage(
+    playback: PlaybackState,
+    song: Song?,
+    accent: Color,
+    isLiked: Boolean,
+    isLikeLoading: Boolean,
+    onToggle: () -> Unit,
+    onNext: () -> Unit,
+    onPrevious: () -> Unit,
+    onSeek: (Long) -> Unit,
+    onToggleLike: (Song) -> Unit,
+    artworkScale: Float,
+    artworkAlpha: Float
+) {
+    val duration = playback.durationMs.coerceAtLeast(1L)
+    val progress = playback.positionMs.coerceIn(0L, duration).toFloat()
+    val heartTint by animateColorAsState(
+        targetValue = if (isLiked) Color(0xFFFF5C7C) else Color.White.copy(alpha = 0.82f),
+        animationSpec = spring(dampingRatio = 0.72f, stiffness = 520f),
+        label = "detail-heart-color"
+    )
+    val heartScale by animateFloatAsState(
+        targetValue = if (isLiked) 1.12f else 1f,
+        animationSpec = spring(dampingRatio = 0.62f, stiffness = 520f),
+        label = "detail-heart-scale"
+    )
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 28.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Spacer(Modifier.weight(0.08f))
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(0.72f)
+                .aspectRatio(1f)
+                .graphicsLayer {
+                    scaleX = artworkScale
+                    scaleY = artworkScale
+                    alpha = artworkAlpha
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            AsyncImage(
+                model = song?.coverUrl,
+                contentDescription = song?.title,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .shadow(40.dp, RoundedCornerShape(18.dp), clip = false)
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(Color(0xFF252525))
+            )
+        }
+        Spacer(Modifier.weight(0.06f))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = song?.title ?: "暂无播放",
+                    color = Color.White.copy(alpha = 0.94f),
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Black,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = song?.artist ?: "未知歌手",
+                    color = Color.White.copy(alpha = 0.60f),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            if (song?.sourceId == "netease") {
+                Box(
+                    modifier = Modifier
+                        .size(46.dp)
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.12f))
+                        .noRippleClick(shape = CircleShape) { onToggleLike(song) },
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isLikeLoading) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 1.8.dp,
+                            color = heartTint
+                        )
+                    } else {
+                        Icon(
+                            Icons.Rounded.Favorite,
+                            contentDescription = "喜欢",
+                            tint = heartTint,
+                            modifier = Modifier
+                                .size(22.dp)
+                                .graphicsLayer {
+                                    scaleX = heartScale
+                                    scaleY = heartScale
+                                }
+                        )
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(22.dp))
+        Slider(
+            value = progress,
+            onValueChange = { onSeek(it.toLong()) },
+            valueRange = 0f..duration.toFloat(),
+            colors = SliderDefaults.colors(
+                thumbColor = Color.White,
+                activeTrackColor = Color.White.copy(alpha = 0.92f),
+                inactiveTrackColor = Color.White.copy(alpha = 0.18f)
+            )
+        )
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(
+                formatTime(playback.positionMs),
+                color = Color.White.copy(alpha = 0.62f),
+                style = MaterialTheme.typography.labelSmall
+            )
+            Text(
+                formatTime(playback.durationMs),
+                color = Color.White.copy(alpha = 0.62f),
+                style = MaterialTheme.typography.labelSmall
+            )
+        }
+        Spacer(Modifier.height(16.dp))
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(24.dp)
+        ) {
+            IconButton(onClick = onPrevious, modifier = Modifier.size(62.dp)) {
+                Icon(
+                    Icons.Rounded.SkipPrevious,
+                    contentDescription = "上一首",
+                    tint = Color.White,
+                    modifier = Modifier.size(38.dp)
+                )
+            }
+            IconButton(
+                onClick = onToggle,
+                modifier = Modifier
+                    .size(76.dp)
+                    .clip(CircleShape)
+                    .background(Color.White)
+            ) {
+                Icon(
+                    if (playback.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                    contentDescription = "播放或暂停",
+                    tint = Color(0xFF111111),
+                    modifier = Modifier.size(42.dp)
+                )
+            }
+            IconButton(onClick = onNext, modifier = Modifier.size(62.dp)) {
+                Icon(
+                    Icons.Rounded.SkipNext,
+                    contentDescription = "下一首",
+                    tint = Color.White,
+                    modifier = Modifier.size(38.dp)
+                )
+            }
+        }
+        Spacer(Modifier.weight(0.1f))
+    }
+}
+
 @Composable
 private fun FullPlayer(
     playback: PlaybackState,
@@ -5152,771 +5545,128 @@ private fun FullPlayer(
     onRefreshPlayerComments: () -> Unit
 ) {
     val song = playback.currentSong
-    val dark = themeSettings.resolveDarkTheme()
     val accent = themeSettings.accentColor()
-    var bottomPanel by remember(song?.id, initialPanel) {
-        mutableStateOf(initialPanel.toBottomPanel())
-    }
     val activeLyricIndex = remember(lyrics, playback.positionMs) {
         lyrics.indexOfLast { it.timeMs <= playback.positionMs }.coerceAtLeast(0)
     }
     val duration = playback.durationMs.coerceAtLeast(1L)
-    val heartTint by animateColorAsState(
-        targetValue = if (isLiked) Color(0xFFFF5C7C) else if (dark) Color.White.copy(alpha = 0.82f) else Color(0xFF111111).copy(alpha = 0.82f),
-        animationSpec = spring(dampingRatio = 0.72f, stiffness = 520f),
-        label = "player-heart-color"
-    )
-    val heartScale by animateFloatAsState(
-        targetValue = if (isLiked) 1.12f else 1f,
-        animationSpec = spring(dampingRatio = 0.62f, stiffness = 520f),
-        label = "player-heart-scale"
-    )
-    val pageForeground = Color.White.copy(alpha = 0.92f)
-    val pageMuted = Color.White.copy(alpha = 0.58f)
+    val initialPage = remember(song?.id, initialPanel) {
+        playerPages.indexOf(initialPanel.toPlayerPage()).coerceAtLeast(0)
+    }
+    val pagerState = rememberPagerState(initialPage = initialPage, pageCount = { playerPages.size })
+    val artworkFraction by remember {
+        derivedStateOf {
+            if (pagerState.currentPage == 0) {
+                pagerState.currentPageOffsetFraction.coerceIn(0f, 1f)
+            } else if (pagerState.currentPage == 1 && pagerState.currentPageOffsetFraction < 0f) {
+                (1f + pagerState.currentPageOffsetFraction).coerceIn(0f, 1f)
+            } else {
+                0f
+            }
+        }
+    }
+    val artworkScale = lerp(1f, 0.5f, artworkFraction)
+    val artworkAlpha = lerp(1f, 0f, artworkFraction)
+    val pagerScope = rememberCoroutineScope()
+
     Box(
         modifier = Modifier
-            .fillMaxWidth()
-            .height(820.dp)
+            .fillMaxSize()
             .navigationBarsPadding()
     ) {
-        AsyncImage(
-            model = song?.coverUrl,
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier
-                .fillMaxSize()
-                .blur(46.dp)
-                .graphicsLayer { alpha = 0.54f }
-        )
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        listOf(
-                            Color(0xFFFF7A3D).copy(alpha = 0.88f),
-                            accent.copy(alpha = 0.34f),
-                            Color(0xFF8A5A43).copy(alpha = 0.90f),
-                            Color(0xFF18242A).copy(alpha = 0.98f)
-                        )
-                    )
-                )
+        DynamicPlayerBackground(
+            coverUrl = song?.coverUrl,
+            accent = accent,
+            modifier = Modifier.fillMaxSize()
         )
         if (lyricDisplayMode == LyricDisplayMode.Particles) {
             LyricStageParticles()
         }
-        CinematicBars()
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 24.dp, vertical = 16.dp),
+                .statusBarsPadding(),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            if (bottomPanel == PlayerBottomPanel.Detail) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(48.dp)
-                            .clip(CircleShape)
-                            .background(Color.White.copy(alpha = 0.08f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("?", color = pageForeground, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
-                    }
-                    IconButton(
-                        onClick = { bottomPanel = PlayerBottomPanel.Playlist },
-                        modifier = Modifier
-                            .size(48.dp)
-                            .clip(CircleShape)
-                            .background(Color.White.copy(alpha = 0.08f))
-                    ) {
-                        Icon(
-                            Icons.AutoMirrored.Rounded.QueueMusic,
-                            contentDescription = "播放列表",
-                            tint = pageForeground
-                        )
-                    }
-                }
-                Spacer(Modifier.height(24.dp))
-                PlayerArtworkStage(song = song, accent = accent, dark = true)
-                Spacer(Modifier.height(20.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Text(
-                            text = song?.title ?: "暂无播放",
-                            color = pageForeground,
-                            style = MaterialTheme.typography.headlineMedium,
-                            fontWeight = FontWeight.Black,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            textAlign = TextAlign.Center
-                        )
-                        Text(
-                            text = song?.artist ?: "未知歌手",
-                            color = pageMuted,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            textAlign = TextAlign.Center
-                        )
-                    }
-                    if (song?.sourceId == "netease") {
-                        Box(
-                            modifier = Modifier
-                                .size(46.dp)
-                                .clip(CircleShape)
-                                .background(Color.White.copy(alpha = 0.16f))
-                                .noRippleClick(shape = CircleShape) { onToggleLike(song) },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (isLikeLoading) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(16.dp),
-                                    strokeWidth = 1.8.dp,
-                                    color = heartTint
-                                )
-                            } else {
-                                Icon(
-                                    Icons.Rounded.Favorite,
-                                    contentDescription = "喜欢",
-                                    tint = heartTint,
-                                    modifier = Modifier
-                                        .size(22.dp)
-                                        .graphicsLayer {
-                                            scaleX = heartScale
-                                            scaleY = heartScale
-                                        }
-                                )
-                            }
-                        }
-                    }
-                }
-                Spacer(Modifier.weight(1f))
-                PlayerTransportControls(
-                    playback = playback,
-                    dark = true,
-                    onToggle = onToggle,
-                    onPrevious = onPrevious,
-                    onNext = onNext
-                )
-                Spacer(Modifier.height(18.dp))
-                PlayerWaveformProgressSection(
-                    playback = playback,
-                    duration = duration,
-                    accent = Color.White.copy(alpha = 0.88f),
-                    onSeek = onSeek
-                )
-                Spacer(Modifier.height(16.dp))
-                PlayerBottomActionBar(
-                    playback = playback,
-                    dark = true,
-                    lyricDisplayMode = lyricDisplayMode,
-                    selectedPanel = bottomPanel,
-                    onSelectPanel = { bottomPanel = it }
-                )
-            } else {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    AsyncImage(
-                        model = song?.coverUrl,
-                        contentDescription = song?.title,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier
-                            .size(56.dp)
-                            .clip(CircleShape)
-                            .background(Color.White.copy(alpha = 0.16f))
-                    )
-                    Spacer(Modifier.width(14.dp))
-                    Text(
-                        text = listOf(song?.title.orEmpty(), song?.artist.orEmpty()).filter { it.isNotBlank() }.joinToString(" - ").ifBlank { "暂无播放" },
-                        color = pageForeground,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Black,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
-                    IconButton(
-                        onClick = onToggle,
-                        modifier = Modifier
-                            .size(46.dp)
-                            .clip(CircleShape)
-                            .background(Color.White.copy(alpha = 0.10f))
-                    ) {
-                        Icon(
-                            if (playback.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                            contentDescription = "播放或暂停",
-                            tint = pageForeground,
-                            modifier = Modifier.size(28.dp)
-                        )
-                    }
-                }
-                Spacer(Modifier.height(10.dp))
-                PlayerBottomActionBar(
-                    playback = playback,
-                    dark = true,
-                    lyricDisplayMode = lyricDisplayMode,
-                    selectedPanel = bottomPanel,
-                    onSelectPanel = { bottomPanel = it }
-                )
-                Spacer(Modifier.height(18.dp))
-                AnimatedContent(
-                    targetState = bottomPanel,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                    transitionSpec = {
-                        val movingForward = targetState.panelOrder >= initialState.panelOrder
-                        (slideInHorizontally(
-                            animationSpec = tween(240),
-                            initialOffsetX = { fullWidth ->
-                                if (movingForward) fullWidth / 7 else -fullWidth / 7
-                            }
-                        ) + fadeIn(animationSpec = tween(180)) + scaleIn(
-                            initialScale = 0.985f,
-                            animationSpec = tween(220)
-                        ))
-                            .togetherWith(
-                                slideOutHorizontally(
-                                    animationSpec = tween(220),
-                                    targetOffsetX = { fullWidth ->
-                                        if (movingForward) -fullWidth / 8 else fullWidth / 8
-                                    }
-                                ) + fadeOut(animationSpec = tween(160)) + scaleOut(
-                                    targetScale = 0.985f,
-                                    animationSpec = tween(180)
-                                )
-                            )
-                    },
-                    label = "player-panel-content"
-                ) { panel ->
-                    when (panel) {
-                        PlayerBottomPanel.Lyrics -> when (lyricDisplayMode) {
-                            LyricDisplayMode.Glass -> GlassLyricsPanel(
-                                lyrics = lyrics,
-                                isLoading = isLyricLoading,
-                                playbackPositionMs = playback.positionMs,
-                                durationMs = duration,
-                                coverUrl = song?.coverUrl,
-                                songTitle = song?.title,
-                                songArtist = song?.artist,
-                                onSeek = onSeek,
-                                isPlaying = playback.isPlaying,
-                                onToggle = onToggle,
-                                onPrevious = onPrevious,
-                                onNext = onNext,
-                                accent = accent,
-                                dark = true,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                            LyricDisplayMode.Particles -> ParticleLyricsPanel(
-                                lyrics = lyrics,
-                                activeIndex = activeLyricIndex,
-                                isLoading = isLyricLoading,
-                                playbackPositionMs = playback.positionMs,
-                                accent = accent,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        }
-                        PlayerBottomPanel.Playlist -> PlayerQueuePanel(
-                            playback = playback,
-                            dark = true,
-                            accent = accent,
-                            onSongSelect = onPlayQueueIndex
-                        )
-                        PlayerBottomPanel.Comments -> PlayerCommentsPanel(
-                            song = song,
-                            comments = playerComments,
-                            commentSort = playerCommentSort,
-                            commentCount = playerCommentCount,
-                            isLoading = isPlayerCommentsLoading,
-                            message = playerCommentsMessage,
-                            dark = true,
-                            accent = accent,
-                            onSortChange = onPlayerCommentSortChange,
-                            onRefresh = onRefreshPlayerComments
-                        )
-                        PlayerBottomPanel.Detail -> PlayerRecordPanel(
-                            song = song,
-                            dark = true,
-                            accent = accent
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-private enum class PlayerBottomPanel {
-    Detail,
-    Playlist,
-    Lyrics,
-    Comments
-}
-
-private fun PlayerSheetPanel.toBottomPanel(): PlayerBottomPanel = when (this) {
-    PlayerSheetPanel.Detail -> PlayerBottomPanel.Detail
-    PlayerSheetPanel.Queue -> PlayerBottomPanel.Playlist
-    PlayerSheetPanel.Lyrics -> PlayerBottomPanel.Lyrics
-    PlayerSheetPanel.Comments -> PlayerBottomPanel.Comments
-}
-
-private val PlayerBottomPanel.panelOrder: Int
-    get() = when (this) {
-        PlayerBottomPanel.Detail -> 0
-        PlayerBottomPanel.Playlist -> 1
-        PlayerBottomPanel.Lyrics -> 2
-        PlayerBottomPanel.Comments -> 3
-    }
-
-@Composable
-private fun PlayerTopBar(
-    playback: PlaybackState,
-    song: Song?,
-    primaryText: Color,
-    secondaryText: Color,
-    accent: Color,
-    heartTint: Color,
-    heartScale: Float,
-    isLikeLoading: Boolean,
-    lyricDisplayMode: LyricDisplayMode,
-    activePanelLabel: String,
-    dark: Boolean,
-    onToggle: () -> Unit,
-    onToggleLike: (Song) -> Unit
-) {
-    Surface(
-        color = if (dark) Color.White.copy(alpha = 0.075f) else Color.White.copy(alpha = 0.58f),
-        border = BorderStroke(1.dp, if (dark) Color.White.copy(alpha = 0.12f) else Color.White.copy(alpha = 0.72f)),
-        shape = RoundedCornerShape(30.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .shadow(20.dp, RoundedCornerShape(30.dp), clip = false)
-    ) {
-        Box {
-            Box(
-                modifier = Modifier
-                    .matchParentSize()
-                    .background(
-                        Brush.linearGradient(
-                            listOf(
-                                Color.White.copy(alpha = if (dark) 0.05f else 0.34f),
-                                accent.copy(alpha = if (dark) 0.10f else 0.08f),
-                                Color.Transparent
-                            )
-                        )
-                    )
-            )
-            Row(
+            PlayerGrabber()
+            HorizontalPager(
+                state = pagerState,
+                beyondViewportPageCount = 1,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                AsyncImage(
-                    model = song?.coverUrl,
-                    contentDescription = song?.title,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .size(58.dp)
-                        .shadow(12.dp, RoundedCornerShape(18.dp), clip = false)
-                        .clip(RoundedCornerShape(18.dp))
-                        .background(accent.copy(alpha = 0.16f))
-                )
-                Spacer(Modifier.width(12.dp))
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Surface(
-                            color = accent.copy(alpha = if (dark) 0.18f else 0.12f),
-                            shape = RoundedCornerShape(999.dp)
-                        ) {
-                            Text(
-                                text = activePanelLabel,
-                                color = accent,
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Black,
-                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp)
-                            )
-                        }
-                    }
-                    Text(
-                        text = song?.title ?: "暂无播放",
-                        color = primaryText,
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Black,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                    .weight(1f)
+            ) { page ->
+                when (playerPages[page]) {
+                    PlayerPage.Detail -> PlayerDetailPage(
+                        playback = playback,
+                        song = song,
+                        accent = accent,
+                        isLiked = isLiked,
+                        isLikeLoading = isLikeLoading,
+                        onToggle = onToggle,
+                        onNext = onNext,
+                        onPrevious = onPrevious,
+                        onSeek = onSeek,
+                        onToggleLike = onToggleLike,
+                        artworkScale = artworkScale,
+                        artworkAlpha = artworkAlpha
                     )
-                    Text(
-                        text = listOf(song?.artist.orEmpty(), song?.album.orEmpty())
-                            .filter { it.isNotBlank() }
-                            .joinToString(" · ")
-                            .ifBlank { if (lyricDisplayMode == LyricDisplayMode.Particles) "粒子歌词舞台" else "Apple Music 风格歌词" },
-                        color = secondaryText,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-                Spacer(Modifier.width(10.dp))
-                if (song?.sourceId == "netease") {
-                    Box(
-                        modifier = Modifier
-                            .size(42.dp)
-                            .clip(CircleShape)
-                            .background(if (dark) Color.White.copy(alpha = 0.08f) else Color.Black.copy(alpha = 0.055f))
-                            .noRippleClick(shape = CircleShape) { onToggleLike(song) },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        if (isLikeLoading) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(16.dp),
-                                strokeWidth = 1.8.dp,
-                                color = heartTint
-                            )
-                        } else {
-                            Icon(
-                                Icons.Rounded.Favorite,
-                                contentDescription = "红心",
-                                tint = heartTint,
-                                modifier = Modifier
-                                    .size(20.dp)
-                                    .graphicsLayer {
-                                        scaleX = heartScale
-                                        scaleY = heartScale
-                                    }
-                            )
-                        }
+                    PlayerPage.Lyrics -> when (lyricDisplayMode) {
+                        LyricDisplayMode.Glass -> GlassLyricsPanel(
+                            lyrics = lyrics,
+                            isLoading = isLyricLoading,
+                            playbackPositionMs = playback.positionMs,
+                            durationMs = duration,
+                            coverUrl = song?.coverUrl,
+                            songTitle = song?.title,
+                            songArtist = song?.artist,
+                            onSeek = onSeek,
+                            isPlaying = playback.isPlaying,
+                            onToggle = onToggle,
+                            onPrevious = onPrevious,
+                            onNext = onNext,
+                            accent = accent,
+                            dark = true,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        LyricDisplayMode.Particles -> ParticleLyricsPanel(
+                            lyrics = lyrics,
+                            activeIndex = activeLyricIndex,
+                            isLoading = isLyricLoading,
+                            playbackPositionMs = playback.positionMs,
+                            accent = accent,
+                            modifier = Modifier.fillMaxSize()
+                        )
                     }
-                    Spacer(Modifier.width(8.dp))
-                }
-                IconButton(
-                    onClick = onToggle,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .shadow(14.dp, CircleShape, clip = false)
-                        .clip(CircleShape)
-                        .background(primaryText)
-                ) {
-                    Icon(
-                        if (playback.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                        contentDescription = "播放或暂停",
-                        tint = if (dark) Color(0xFF111111) else Color.White,
-                        modifier = Modifier.size(27.dp)
+                    PlayerPage.Queue -> PlayerQueuePanel(
+                        playback = playback,
+                        dark = true,
+                        accent = accent,
+                        onSongSelect = onPlayQueueIndex
+                    )
+                    PlayerPage.Comments -> PlayerCommentsPanel(
+                        song = song,
+                        comments = playerComments,
+                        commentSort = playerCommentSort,
+                        commentCount = playerCommentCount,
+                        isLoading = isPlayerCommentsLoading,
+                        message = playerCommentsMessage,
+                        dark = true,
+                        accent = accent,
+                        onSortChange = onPlayerCommentSortChange,
+                        onRefresh = onRefreshPlayerComments
                     )
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun PlayerArtworkStage(
-    song: Song?,
-    accent: Color,
-    dark: Boolean
-) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .aspectRatio(1f),
-        contentAlignment = Alignment.Center
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth(0.82f)
-                .aspectRatio(1f)
-                .blur(52.dp)
-                .background(
-                    Brush.radialGradient(
-                        listOf(
-                            accent.copy(alpha = if (dark) 0.42f else 0.20f),
-                            Color.Transparent
-                        )
-                    ),
-                    CircleShape
-                )
-        )
-        AsyncImage(
-            model = song?.coverUrl,
-            contentDescription = song?.title,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier
-                .fillMaxWidth(0.72f)
-                .aspectRatio(1f)
-                .shadow(34.dp, RoundedCornerShape(38.dp), clip = false)
-                .clip(RoundedCornerShape(38.dp))
-                .background(Color(0xFF252525))
-        )
-    }
-}
-
-@Composable
-private fun PlayerProgressSection(
-    playback: PlaybackState,
-    duration: Long,
-    dark: Boolean,
-    accent: Color,
-    onSeek: (Long) -> Unit
-) {
-    val secondaryText = if (dark) Color(0xFFB8C1B9) else Color(0xFF6A6D72)
-    val progress = playback.positionMs.coerceIn(0L, duration).toFloat()
-    Slider(
-        value = progress,
-        onValueChange = { onSeek(it.toLong()) },
-        valueRange = 0f..duration.toFloat(),
-        colors = SliderDefaults.colors(
-            thumbColor = accent,
-            activeTrackColor = accent,
-            inactiveTrackColor = if (dark) Color.White.copy(alpha = 0.16f) else Color.Black.copy(alpha = 0.10f)
-        )
-    )
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(
-            formatTime(playback.positionMs),
-            color = secondaryText,
-            style = MaterialTheme.typography.labelSmall
-        )
-        Text(
-            formatTime(playback.durationMs),
-            color = secondaryText,
-            style = MaterialTheme.typography.labelSmall
-        )
-    }
-}
-
-@Composable
-private fun PlayerWaveformProgressSection(
-    playback: PlaybackState,
-    duration: Long,
-    accent: Color,
-    onSeek: (Long) -> Unit
-) {
-    val progress = playback.positionMs.coerceIn(0L, duration).toFloat()
-    val activeFraction = (progress / duration.toFloat()).coerceIn(0f, 1f)
-    val barHeights = remember {
-        listOf(18, 34, 46, 22, 10, 30, 14, 42, 24, 50, 18, 34, 12, 38, 16, 44, 28, 54, 20, 36, 12, 48, 26, 58, 16, 40)
-    }
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(formatTime(playback.positionMs), color = Color.White.copy(alpha = 0.82f), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
-        Text(formatTime(playback.durationMs), color = Color.White.copy(alpha = 0.82f), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
-    }
-    Spacer(Modifier.height(10.dp))
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(58.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            barHeights.forEachIndexed { index, height ->
-                val active = index <= (barHeights.lastIndex * activeFraction).fastRoundToInt()
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(height.dp)
-                        .clip(RoundedCornerShape(999.dp))
-                        .background(if (active) accent else Color.White.copy(alpha = 0.30f))
-                )
-            }
-        }
-        Slider(
-            value = progress,
-            onValueChange = { onSeek(it.toLong()) },
-            valueRange = 0f..duration.toFloat(),
-            modifier = Modifier
-                .matchParentSize()
-                .alpha(0.01f),
-            colors = SliderDefaults.colors(
-                thumbColor = Color.Transparent,
-                activeTrackColor = Color.Transparent,
-                inactiveTrackColor = Color.Transparent
-            )
-        )
-    }
-}
-
-@Composable
-private fun PlayerTransportControls(
-    playback: PlaybackState,
-    dark: Boolean,
-    onToggle: () -> Unit,
-    onPrevious: () -> Unit,
-    onNext: () -> Unit
-) {
-    val iconTint = if (dark) Color.White else Color(0xFF111111)
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(18.dp)) {
-        IconButton(onClick = onPrevious, modifier = Modifier.size(58.dp)) {
-            Icon(
-                Icons.Rounded.SkipPrevious,
-                contentDescription = "上一首",
-                tint = iconTint,
-                modifier = Modifier.size(36.dp)
-            )
-        }
-        IconButton(
-            onClick = onToggle,
-            modifier = Modifier
-                .size(86.dp)
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.primary)
-        ) {
-            Icon(
-                if (playback.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                contentDescription = "播放或暂停",
-                tint = MaterialTheme.colorScheme.onPrimary,
-                modifier = Modifier.size(44.dp)
-            )
-        }
-        IconButton(onClick = onNext, modifier = Modifier.size(58.dp)) {
-            Icon(
-                Icons.Rounded.SkipNext,
-                contentDescription = "下一首",
-                tint = iconTint,
-                modifier = Modifier.size(36.dp)
-            )
-        }
-    }
-}
-
-@Composable
-private fun PlayerBottomActionBar(
-    playback: PlaybackState,
-    dark: Boolean,
-    lyricDisplayMode: LyricDisplayMode,
-    selectedPanel: PlayerBottomPanel,
-    onSelectPanel: (PlayerBottomPanel) -> Unit
-) {
-    val items = listOf(
-        PlayerActionItem(
-            panel = PlayerBottomPanel.Detail,
-            label = if (lyricDisplayMode == LyricDisplayMode.Glass) "唱片" else "舞台",
-            icon = Icons.Rounded.Album
-        ),
-        PlayerActionItem(
-            panel = PlayerBottomPanel.Playlist,
-            label = "列表",
-            icon = Icons.AutoMirrored.Rounded.QueueMusic
-        ),
-        PlayerActionItem(
-            panel = PlayerBottomPanel.Lyrics,
-            label = "歌词",
-            icon = Icons.Rounded.Subtitles
-        ),
-        PlayerActionItem(
-            panel = PlayerBottomPanel.Comments,
-            label = "评论",
-            icon = Icons.AutoMirrored.Rounded.Comment
-        )
-    )
-    Surface(
-        color = Color.White.copy(alpha = if (dark) 0.075f else 0.18f),
-        border = BorderStroke(1.dp, Color.White.copy(alpha = if (dark) 0.12f else 0.28f)),
-        shape = RoundedCornerShape(30.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(66.dp)
-            .shadow(16.dp, RoundedCornerShape(30.dp), clip = false)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 10.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            items.forEach { item ->
-                val selected = item.panel == selectedPanel
-                val tint by animateColorAsState(
-                    targetValue = if (selected) {
-                        MaterialTheme.colorScheme.primary
-                    } else if (dark) {
-                        Color.White.copy(alpha = 0.70f)
-                    } else {
-                        Color(0xFF111111).copy(alpha = 0.68f)
-                    },
-                    animationSpec = spring(dampingRatio = 0.78f, stiffness = 480f),
-                    label = "player-bottom-action-tint"
-                )
-                val scale by animateFloatAsState(
-                    targetValue = if (selected) 1.07f else 1f,
-                    animationSpec = spring(dampingRatio = 0.58f, stiffness = 520f),
-                    label = "player-bottom-action-scale"
-                )
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                        .clip(RoundedCornerShape(22.dp))
-                        .background(
-                            if (selected) {
-                                Brush.verticalGradient(
-                                    listOf(
-                                        Color.White.copy(alpha = if (dark) 0.14f else 0.72f),
-                                        MaterialTheme.colorScheme.primary.copy(alpha = if (dark) 0.18f else 0.10f)
-                                    )
-                                )
-                            } else {
-                                Brush.verticalGradient(listOf(Color.Transparent, Color.Transparent))
-                            }
-                        )
-                        .noRippleClick(shape = RoundedCornerShape(22.dp)) { onSelectPanel(item.panel) },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                        Icon(
-                            imageVector = item.icon,
-                            contentDescription = item.label,
-                            tint = tint,
-                            modifier = Modifier
-                                .size(if (selected) 30.dp else 27.dp)
-                                .graphicsLayer {
-                                    scaleX = scale
-                                    scaleY = scale
-                                }
-                        )
-                        Spacer(Modifier.height(6.dp))
-                        Box(
-                            modifier = Modifier
-                                .width(if (selected) 26.dp else 6.dp)
-                                .height(4.dp)
-                                .clip(RoundedCornerShape(999.dp))
-                                .background(if (selected) tint.copy(alpha = 0.72f) else Color.Transparent)
-                        )
-                    }
+            PlayerTabBar(
+                currentPage = pagerState.currentPage,
+                onPageSelect = { index ->
+                    pagerScope.launch { pagerState.animateScrollToPage(index) }
                 }
-            }
+            )
         }
     }
 }
-
-private data class PlayerActionItem(
-    val panel: PlayerBottomPanel,
-    val label: String,
-    val icon: ImageVector
-)
 
 @Composable
 private fun PlayerQueuePanel(
@@ -5929,10 +5679,21 @@ private fun PlayerQueuePanel(
     val currentIndex = playback.currentIndex.coerceAtLeast(0)
     val currentQueueSong = playback.queue.getOrNull(currentIndex)
     val currentSong = playback.currentSong ?: currentQueueSong
+    val playedSongs = playback.queue
+        .mapIndexed { index, song -> index to song }
+        .take(currentIndex)
     val upcomingSongs = playback.queue
         .mapIndexed { index, song -> index to song }
         .drop(currentIndex + 1)
+    val listState = rememberLazyListState()
+    LaunchedEffect(currentIndex) {
+        val playedCount = playedSongs.size
+        if (playedCount > 0) {
+            listState.animateScrollToItem(playedCount + 1)
+        }
+    }
     LazyColumn(
+        state = listState,
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 8.dp, vertical = 8.dp),
@@ -5945,6 +5706,24 @@ private fun PlayerQueuePanel(
                 subtitle = if (playback.queue.isEmpty()) "当前没有播放队列" else "${playback.queue.size} 首歌在队列中",
                 dark = dark
             )
+        }
+        if (playedSongs.isNotEmpty()) {
+            item {
+                PlayerQueueSectionLabel("已播放", sectionText)
+            }
+            items(playedSongs, key = { "played-${it.first}" }) { (index, item) ->
+                PlayerQueueRow(
+                    index = index,
+                    song = item,
+                    active = false,
+                    isPreparing = false,
+                    playbackPositionMs = playback.positionMs,
+                    dark = dark,
+                    accent = accent,
+                    dimmed = true,
+                    onClick = { onSongSelect(index) }
+                )
+            }
         }
         if (currentSong != null) {
             item {
@@ -6022,6 +5801,7 @@ private fun PlayerQueueRow(
     playbackPositionMs: Long,
     dark: Boolean,
     accent: Color,
+    dimmed: Boolean = false,
     onClick: () -> Unit
 ) {
     val titleColor = if (dark) Color.White else Color(0xFF111111)
@@ -6042,6 +5822,7 @@ private fun PlayerQueueRow(
         targetValue = when {
             pressed -> 0.95f
             active -> 1f
+            dimmed -> 0.50f
             else -> 0.98f
         },
         animationSpec = spring(dampingRatio = 0.78f, stiffness = 520f),
@@ -6160,50 +5941,6 @@ private fun PlayerQueueRow(
                 )
             }
         }
-    }
-}
-
-@Composable
-private fun PlayerRecordPanel(
-    song: Song?,
-    dark: Boolean,
-    accent: Color
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 22.dp, vertical = 22.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        PlayerPanelHeader(
-            title = "唱片信息",
-            subtitle = song?.title ?: "暂无播放",
-            dark = dark
-        )
-        PlayerInfoCard(
-            label = "歌曲",
-            value = song?.title ?: "暂无播放",
-            dark = dark,
-            accent = accent
-        )
-        PlayerInfoCard(
-            label = "歌手",
-            value = song?.artist ?: "未知歌手",
-            dark = dark,
-            accent = accent
-        )
-        PlayerInfoCard(
-            label = "专辑",
-            value = song?.album ?: "未知专辑",
-            dark = dark,
-            accent = accent
-        )
-        PlayerInfoCard(
-            label = "模式",
-            value = "Apple Music 灵感的极简全屏播放器",
-            dark = dark,
-            accent = accent
-        )
     }
 }
 
@@ -6524,51 +6261,6 @@ private fun PlayerPanelHeader(
 }
 
 @Composable
-private fun PlayerInfoCard(
-    label: String,
-    value: String,
-    dark: Boolean,
-    accent: Color
-) {
-    val titleColor = if (dark) Color.White else Color(0xFF111111)
-    val secondaryText = if (dark) Color(0xFFB8C1B9) else Color(0xFF6A6D72)
-    Surface(
-        color = if (dark) Color.White.copy(alpha = 0.06f) else Color.White.copy(alpha = 0.68f),
-        border = BorderStroke(1.dp, if (dark) Color.White.copy(alpha = 0.08f) else Color.Black.copy(alpha = 0.06f)),
-        shape = RoundedCornerShape(24.dp)
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(10.dp)
-                        .clip(CircleShape)
-                        .background(accent)
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = label,
-                    color = secondaryText,
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-            Text(
-                text = value,
-                color = titleColor,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
-        }
-    }
-}
-
-@Composable
 private fun GlassLyricsPanel(
     lyrics: List<LyricLine>,
     isLoading: Boolean,
@@ -6593,110 +6285,122 @@ private fun GlassLyricsPanel(
             lyrics.ifEmpty { listOf(LyricLine(0L, "暂时没有歌词")) }
         }
     }
-    val activeIndex = remember(lyricItems, playbackPositionMs) {
-        lyricItems.indexOfLast { it.timeMs <= playbackPositionMs }.coerceAtLeast(0)
+
+    var interpolatedMs by remember { mutableStateOf(playbackPositionMs) }
+    var lastKnownMs by remember { mutableStateOf(playbackPositionMs) }
+    var lastKnownNanos by remember { mutableStateOf(0L) }
+
+    LaunchedEffect(playbackPositionMs) {
+        lastKnownMs = playbackPositionMs
+        lastKnownNanos = System.nanoTime()
+        interpolatedMs = playbackPositionMs
+    }
+
+    LaunchedEffect(isPlaying, lastKnownMs) {
+        if (!isPlaying) {
+            interpolatedMs = lastKnownMs
+            return@LaunchedEffect
+        }
+        while (true) {
+            withFrameNanos { frameNanos ->
+                if (lastKnownNanos > 0L) {
+                    val elapsedMs = (frameNanos - lastKnownNanos) / 1_000_000L
+                    interpolatedMs = (lastKnownMs + elapsedMs).coerceIn(0L, durationMs.coerceAtLeast(1L))
+                }
+            }
+        }
+    }
+
+    val activeIndex = remember(lyricItems, interpolatedMs) {
+        lyricItems.indexOfLast { it.timeMs <= interpolatedMs }.coerceAtLeast(0)
     }
     val listState = rememberLazyListState()
-    val duration = durationMs.coerceAtLeast(1L)
-    val progress = playbackPositionMs.coerceIn(0L, duration).toFloat()
 
     LaunchedEffect(activeIndex, lyricItems.size) {
         if (lyricItems.isEmpty()) return@LaunchedEffect
         val viewportHeight = listState.layoutInfo.viewportSize.height
-        val centerOffset = if (viewportHeight > 0) {
-            -((viewportHeight / 2f) - 132f).toInt()
+        val focusOffset = if (viewportHeight > 0) {
+            -((viewportHeight * 0.35f) - 60f).toInt()
         } else {
-            -220
+            -200
         }
         listState.animateScrollToItem(
             index = activeIndex.coerceIn(0, lyricItems.lastIndex),
-            scrollOffset = centerOffset
+            scrollOffset = focusOffset
         )
     }
 
-    Box(
-        modifier = modifier
-            .clip(RoundedCornerShape(34.dp))
-            .background(Color(0xFF0C0C0C))
-    ) {
-        AsyncImage(
-            model = coverUrl,
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier
-                .matchParentSize()
-                .blur(56.dp)
-                .graphicsLayer {
-                    scaleX = 1.16f
-                    scaleY = 1.16f
-                    alpha = 0.78f
-                }
-        )
-        Box(
-            modifier = Modifier
-                .matchParentSize()
-                .background(
-                    Brush.verticalGradient(
-                        listOf(
-                            Color.Black.copy(alpha = 0.88f),
-                            accent.copy(alpha = 0.30f),
-                            Color.Black.copy(alpha = 0.56f),
-                            Color.Black.copy(alpha = 0.94f)
-                        )
-                    )
-                )
-        )
-        Box(
-            modifier = Modifier
-                .matchParentSize()
-                .background(
-                    Brush.radialGradient(
-                        listOf(
-                            Color.White.copy(alpha = 0.08f),
-                            Color.Transparent
-                        ),
-                        radius = 900f
-                    )
-                )
-        )
-
+    Box(modifier = modifier) {
         Column(
             modifier = Modifier
                 .align(Alignment.TopStart)
-                .padding(start = 20.dp, top = 20.dp, end = 20.dp)
+                .padding(start = 16.dp, top = 12.dp, end = 16.dp)
+                .zIndex(2f)
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
                 AsyncImage(
                     model = coverUrl,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
-                        .size(44.dp)
-                        .clip(RoundedCornerShape(12.dp))
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(10.dp))
                 )
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(
+                    MarqueeText(
                         text = songTitle.orEmpty().ifBlank { "未知歌曲" },
-                        color = Color.White,
+                        color = Color.White.copy(alpha = 0.94f),
                         style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        fontWeight = FontWeight.SemiBold
                     )
-                    Text(
+                    MarqueeText(
                         text = songArtist.orEmpty().ifBlank { "未知歌手" },
-                        color = Color.White.copy(alpha = 0.72f),
+                        color = Color.White.copy(alpha = 0.62f),
                         style = MaterialTheme.typography.labelMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        fontWeight = FontWeight.Normal
                     )
                 }
-                Text(
-                    text = "?",
-                    color = Color.White.copy(alpha = 0.72f),
-                    style = MaterialTheme.typography.headlineSmall
-                )
+                Spacer(Modifier.width(6.dp))
+                IconButton(
+                    onClick = onPrevious,
+                    modifier = Modifier.size(34.dp)
+                ) {
+                    Icon(
+                        Icons.Rounded.SkipPrevious,
+                        contentDescription = "上一首",
+                        tint = Color.White.copy(alpha = 0.82f),
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                IconButton(
+                    onClick = onToggle,
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .background(Color.White.copy(alpha = 0.14f))
+                ) {
+                    Icon(
+                        if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                        contentDescription = "播放或暂停",
+                        tint = Color.White,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+                IconButton(
+                    onClick = onNext,
+                    modifier = Modifier.size(34.dp)
+                ) {
+                    Icon(
+                        Icons.Rounded.SkipNext,
+                        contentDescription = "下一首",
+                        tint = Color.White.copy(alpha = 0.82f),
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
             }
         }
 
@@ -6704,12 +6408,12 @@ private fun GlassLyricsPanel(
             state = listState,
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 22.dp),
+                .padding(horizontal = 24.dp),
             horizontalAlignment = Alignment.Start,
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             item(key = "apple-lyrics-top") {
-                Spacer(Modifier.height(132.dp))
+                Spacer(Modifier.height(80.dp))
             }
             itemsIndexed(
                 items = lyricItems,
@@ -6719,7 +6423,7 @@ private fun GlassLyricsPanel(
                 val distance = kotlin.math.abs(index - activeIndex)
                 val nextTime = lyricItems.getOrNull(index + 1)?.timeMs ?: (line.timeMs + 3_800L)
                 val karaokeProgress = if (isActive && nextTime > line.timeMs) {
-                    ((playbackPositionMs - line.timeMs).toFloat() / (nextTime - line.timeMs).toFloat()).coerceIn(0f, 1f)
+                    ((interpolatedMs - line.timeMs).toFloat() / (nextTime - line.timeMs).toFloat()).coerceIn(0f, 1f)
                 } else {
                     0f
                 }
@@ -6764,70 +6468,32 @@ private fun GlassLyricsPanel(
                 }
             }
             item(key = "apple-lyrics-bottom") {
-                Spacer(Modifier.height(260.dp))
+                Spacer(Modifier.height(200.dp))
             }
         }
 
-        Column(
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .height(56.dp)
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color.Black.copy(alpha = 0.52f), Color.Transparent)
+                    )
+                )
+        )
+        Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
+                .height(72.dp)
                 .background(
                     Brush.verticalGradient(
-                        listOf(Color.Transparent, Color.Black.copy(alpha = 0.88f))
+                        listOf(Color.Transparent, Color.Black.copy(alpha = 0.48f))
                     )
                 )
-                .padding(horizontal = 24.dp, vertical = 16.dp)
-        ) {
-            Slider(
-                value = progress,
-                onValueChange = { onSeek(it.toLong()) },
-                valueRange = 0f..duration.toFloat(),
-                colors = SliderDefaults.colors(
-                    thumbColor = Color.White,
-                    activeTrackColor = Color.White,
-                    inactiveTrackColor = Color.White.copy(alpha = 0.20f)
-                )
-            )
-            Spacer(Modifier.height(10.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(formatTime(playbackPositionMs), color = Color.White.copy(alpha = 0.72f), style = MaterialTheme.typography.labelSmall)
-                Text(formatTime(durationMs), color = Color.White.copy(alpha = 0.72f), style = MaterialTheme.typography.labelSmall)
-            }
-            Spacer(Modifier.height(18.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = onPrevious, modifier = Modifier.size(54.dp)) {
-                    Icon(
-                        Icons.Rounded.SkipPrevious,
-                        contentDescription = "上一首",
-                        tint = Color.White,
-                        modifier = Modifier.size(34.dp)
-                    )
-                }
-                Spacer(Modifier.width(20.dp))
-                IconButton(onClick = onToggle, modifier = Modifier.size(64.dp)) {
-                    Icon(
-                        if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                        contentDescription = "播放或暂停",
-                        tint = Color.White,
-                        modifier = Modifier.size(42.dp)
-                    )
-                }
-                Spacer(Modifier.width(20.dp))
-                IconButton(onClick = onNext, modifier = Modifier.size(54.dp)) {
-                    Icon(
-                        Icons.Rounded.SkipNext,
-                        contentDescription = "下一首",
-                        tint = Color.White,
-                        modifier = Modifier.size(34.dp)
-                    )
-                }
-            }
-        }
+        )
     }
 }
 
@@ -6853,25 +6519,24 @@ private fun AppleMusicLyricLineText(
         inactiveTextStyle ?: MaterialTheme.typography.titleLarge.copy(fontSize = 22.sp, lineHeight = 28.sp)
     }
     val fontWeight = if (active) FontWeight.Black else FontWeight.Bold
-    val displayText = remember(text, active, progress, accent, activeTextColor, inactiveTextColor, unsungTextColor) {
-        if (!active) {
-            buildAnnotatedString {
-                withStyle(SpanStyle(color = inactiveTextColor)) {
-                    append(text)
+    val displayText = if (!active) {
+        buildAnnotatedString {
+            withStyle(SpanStyle(color = inactiveTextColor)) {
+                append(text)
+            }
+        }
+    } else {
+        val p = progress.coerceIn(0f, 1f)
+        val splitIndex = if (p >= 0.98f) text.length else (text.length * p).toInt().coerceIn(0, text.length)
+        buildAnnotatedString {
+            if (splitIndex > 0) {
+                withStyle(SpanStyle(color = activeTextColor)) {
+                    append(text.substring(0, splitIndex))
                 }
             }
-        } else {
-            val splitIndex = (text.length * progress.coerceIn(0f, 1f)).toInt().coerceIn(0, text.length)
-            buildAnnotatedString {
-                if (splitIndex > 0) {
-                    withStyle(SpanStyle(color = activeTextColor)) {
-                        append(text.substring(0, splitIndex))
-                    }
-                }
-                if (splitIndex < text.length) {
-                    withStyle(SpanStyle(color = unsungTextColor)) {
-                        append(text.substring(splitIndex))
-                    }
+            if (splitIndex < text.length) {
+                withStyle(SpanStyle(color = unsungTextColor)) {
+                    append(text.substring(splitIndex))
                 }
             }
         }
@@ -7138,28 +6803,65 @@ private fun ImmersiveLyrics(
 }
 
 @Composable
-private fun CinematicBars() {
-    Column(Modifier.fillMaxSize()) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(72.dp)
-                .background(
-                    Brush.verticalGradient(
-                        listOf(Color.Black.copy(alpha = 0.74f), Color.Transparent)
-                    )
+private fun MarqueeText(
+    text: String,
+    color: Color,
+    style: androidx.compose.ui.text.TextStyle,
+    fontWeight: FontWeight?,
+    modifier: Modifier = Modifier
+) {
+    var needsScroll by remember { mutableStateOf(false) }
+    var textWidth by remember { mutableFloatStateOf(0f) }
+    var containerWidth by remember { mutableFloatStateOf(0f) }
+    val scrollOffset = remember { androidx.compose.animation.core.Animatable(0f) }
+
+    LaunchedEffect(text) {
+        scrollOffset.snapTo(0f)
+        needsScroll = false
+    }
+
+    LaunchedEffect(needsScroll, textWidth, containerWidth) {
+        if (!needsScroll || textWidth <= containerWidth) return@LaunchedEffect
+        val distance = textWidth - containerWidth + 40f
+        while (true) {
+            delay(2000)
+            scrollOffset.animateTo(
+                targetValue = -distance,
+                animationSpec = tween(
+                    durationMillis = (distance * 18).toInt().coerceIn(2000, 8000),
+                    easing = LinearEasing
                 )
-        )
-        Spacer(Modifier.weight(1f))
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(92.dp)
-                .background(
-                    Brush.verticalGradient(
-                        listOf(Color.Transparent, Color.Black.copy(alpha = 0.86f))
-                    )
-                )
+            )
+            delay(1500)
+            scrollOffset.animateTo(
+                targetValue = 0f,
+                animationSpec = tween(600)
+            )
+        }
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .clipToBounds()
+            .onSizeChanged { containerWidth = it.width.toFloat() }
+    ) {
+        Text(
+            text = text,
+            color = color,
+            style = style,
+            fontWeight = fontWeight,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Visible,
+            onTextLayout = { result ->
+                val measured = result.size.width.toFloat()
+                textWidth = measured
+                needsScroll = result.hasVisualOverflow || measured > containerWidth
+            },
+            modifier = Modifier.graphicsLayer {
+                translationX = scrollOffset.value
+            }
         )
     }
 }

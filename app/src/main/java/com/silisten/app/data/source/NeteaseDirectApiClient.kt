@@ -15,6 +15,7 @@ import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import okhttp3.FormBody
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -25,6 +26,35 @@ import org.json.JSONObject
 internal class NeteaseDirectApiClient(
     private val cookieJar: PersistentCookieJar
 ) {
+    init {
+        ensureDeviceCookies()
+    }
+
+    private fun ensureDeviceCookies() {
+        if (cookieJar.cookieValue("os") != null) return
+        val deviceId = "SiListen_" + java.util.UUID.randomUUID().toString().replace("-", "").take(16)
+        val defaults = mapOf(
+            "os" to "android",
+            "appver" to "9.1.72",
+            "versioncode" to "250",
+            "mobilename" to "SiListen",
+            "osver" to "14",
+            "resolution" to "1080x2400",
+            "deviceId" to deviceId,
+            "channel" to "netease"
+        )
+        val existing = mutableMapOf<String, String>()
+        defaults.forEach { (k, v) ->
+            if (cookieJar.cookieValue(k) == null) {
+                existing[k] = v
+            }
+        }
+        if (existing.isNotEmpty()) {
+            val header = existing.entries.joinToString("; ") { "${it.key}=${it.value}" }
+            cookieJar.saveCookieHeader(header, "https://music.163.com".toHttpUrl())
+        }
+    }
+
     private val client = OkHttpClient.Builder()
         .connectTimeout(3, TimeUnit.SECONDS)
         .readTimeout(8, TimeUnit.SECONDS)
@@ -60,7 +90,7 @@ internal class NeteaseDirectApiClient(
             "/login/qr/key" -> postWeApi(
                 "/weapi/login/qrcode/unikey",
                 mapOf(
-                    "type" to request.param("type", "3"),
+                    "type" to request.param("type", "1"),
                     "timerstamp" to System.currentTimeMillis().toString()
                 )
             )
@@ -78,7 +108,7 @@ internal class NeteaseDirectApiClient(
                 "/weapi/login/qrcode/client/login",
                 mapOf(
                     "key" to request.param("key"),
-                    "type" to request.param("type", "3"),
+                    "type" to request.param("type", "1"),
                     "timerstamp" to System.currentTimeMillis().toString()
                 )
             )
