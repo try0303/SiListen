@@ -142,6 +142,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.geometry.Offset
@@ -166,13 +167,10 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.composed
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
@@ -1888,37 +1886,52 @@ private fun AppleMusicLyricLineText(
         inactiveTextStyle ?: MaterialTheme.typography.titleLarge.copy(fontSize = 22.sp, lineHeight = 28.sp)
     }
     val fontWeight = if (active) FontWeight.Black else FontWeight.Bold
-    val displayText = if (!active) {
-        buildAnnotatedString {
-            withStyle(SpanStyle(color = inactiveTextColor)) {
-                append(text)
-            }
-        }
-    } else {
-        val p = progress.coerceIn(0f, 1f)
-        val splitIndex = if (p >= 0.98f) text.length else (text.length * p).toInt().coerceIn(0, text.length)
-        buildAnnotatedString {
-            if (splitIndex > 0) {
-                withStyle(SpanStyle(color = activeTextColor)) {
-                    append(text.substring(0, splitIndex))
-                }
-            }
-            if (splitIndex < text.length) {
-                withStyle(SpanStyle(color = unsungTextColor)) {
-                    append(text.substring(splitIndex))
-                }
-            }
-        }
+    val maxLines = if (active) activeMaxLines else inactiveMaxLines
+    if (!active) {
+        Text(
+            text = text,
+            color = inactiveTextColor,
+            style = baseStyle,
+            fontWeight = fontWeight,
+            textAlign = textAlign,
+            maxLines = maxLines,
+            overflow = TextOverflow.Ellipsis,
+            modifier = modifier.fillMaxWidth()
+        )
+        return
     }
-    Text(
-        text = displayText,
-        style = baseStyle,
-        fontWeight = fontWeight,
-        textAlign = textAlign,
-        maxLines = if (active) activeMaxLines else inactiveMaxLines,
-        overflow = TextOverflow.Ellipsis,
-        modifier = modifier.fillMaxWidth()
-    )
+
+    Box(modifier = modifier.fillMaxWidth()) {
+        Text(
+            text = text,
+            color = unsungTextColor,
+            style = baseStyle,
+            fontWeight = fontWeight,
+            textAlign = textAlign,
+            maxLines = maxLines,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Text(
+            text = text,
+            color = activeTextColor,
+            style = baseStyle,
+            fontWeight = fontWeight,
+            textAlign = textAlign,
+            maxLines = maxLines,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .fillMaxWidth()
+                .drawWithContent {
+                    val fillWidth = size.width * progress.coerceIn(0f, 1f)
+                    if (fillWidth > 0f) {
+                        clipRect(right = fillWidth, bottom = size.height) {
+                            this@drawWithContent.drawContent()
+                        }
+                    }
+                }
+        )
+    }
 }
 
 @Composable
