@@ -3081,7 +3081,9 @@ private fun SiListenNav(
                         text = label,
                         color = if (index == selectedIndex) contentColor else contentColor.copy(alpha = 0.68f),
                         style = MaterialTheme.typography.labelSmall,
-                        fontWeight = if (index == selectedIndex) FontWeight.Black else FontWeight.Medium
+                        fontWeight = if (index == selectedIndex) FontWeight.Black else FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Clip
                     )
                 }
             }
@@ -3123,7 +3125,9 @@ private fun SiListenNav(
                             text = label,
                             color = if (index == selectedIndex) contentColor else contentColor.copy(alpha = 0.64f),
                             style = MaterialTheme.typography.labelSmall,
-                            fontWeight = if (index == selectedIndex) FontWeight.Black else FontWeight.Medium
+                            fontWeight = if (index == selectedIndex) FontWeight.Black else FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Clip
                         )
                     }
                 }
@@ -6476,7 +6480,7 @@ private fun GlassLyricsPanel(
         if (lyricItems.isEmpty()) return@LaunchedEffect
         val viewportHeight = listState.layoutInfo.viewportSize.height
         val centerOffset = if (viewportHeight > 0) {
-            -((viewportHeight / 2f) - 92f).toInt()
+            -((viewportHeight / 2f) - 132f).toInt()
         } else {
             -220
         }
@@ -6608,7 +6612,7 @@ private fun GlassLyricsPanel(
                     label = "apple-lyric-alpha"
                 )
                 val lineScale by animateFloatAsState(
-                    targetValue = if (isActive) 1.14f else 0.90f - (distance.coerceAtMost(4) * 0.03f),
+                    targetValue = if (isActive) 1.0f else 0.94f - (distance.coerceAtMost(4) * 0.025f),
                     animationSpec = spring(dampingRatio = 0.76f, stiffness = 260f),
                     label = "apple-lyric-scale"
                 )
@@ -6636,7 +6640,7 @@ private fun GlassLyricsPanel(
                 }
             }
             item(key = "apple-lyrics-bottom") {
-                Spacer(Modifier.height(170.dp))
+                Spacer(Modifier.height(260.dp))
             }
         }
 
@@ -6710,7 +6714,11 @@ private fun AppleMusicLyricLineText(
     progress: Float,
     accent: Color
 ) {
-    val baseStyle = if (active) MaterialTheme.typography.displaySmall else MaterialTheme.typography.headlineSmall
+    val baseStyle = if (active) {
+        MaterialTheme.typography.headlineLarge.copy(fontSize = 32.sp, lineHeight = 37.sp)
+    } else {
+        MaterialTheme.typography.titleLarge.copy(fontSize = 22.sp, lineHeight = 28.sp)
+    }
     val fontWeight = if (active) FontWeight.Black else FontWeight.Bold
     BoxWithConstraints(
         modifier = Modifier.fillMaxWidth(),

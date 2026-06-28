@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -283,11 +284,12 @@ fun KernelSuFloatingBottomBar(
     val pillHighlight = rememberGravityRotatedHighlight(iosIndicatorSpecular, extraDegrees = 90f)
 
     Box(
-        modifier = modifier.width(IntrinsicSize.Min),
+        modifier = modifier.width(304.dp),
         contentAlignment = Alignment.CenterStart
     ) {
         Row(
             Modifier
+                .fillMaxWidth()
                 .onGloballyPositioned { coords ->
                     totalWidthPx = coords.size.width.toFloat()
                     val contentWidthPx = totalWidthPx - with(density) { 8.dp.toPx() }
@@ -348,6 +350,7 @@ fun KernelSuFloatingBottomBar(
             ) {
                 Row(
                     Modifier
+                        .fillMaxWidth()
                         .clearAndSetSemantics {}
                         .alpha(0f)
                         .layerBackdrop(tabsBackdrop)
