@@ -162,10 +162,13 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.composed
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
@@ -6712,59 +6715,55 @@ private fun AppleMusicLyricLineText(
     text: String,
     active: Boolean,
     progress: Float,
-    accent: Color
+    accent: Color,
+    activeTextColor: Color = Color.White,
+    inactiveTextColor: Color = Color.White.copy(alpha = 0.58f),
+    unsungTextColor: Color = Color.White.copy(alpha = 0.44f),
+    activeTextStyle: androidx.compose.ui.text.TextStyle? = null,
+    inactiveTextStyle: androidx.compose.ui.text.TextStyle? = null,
+    textAlign: TextAlign = TextAlign.Start,
+    activeMaxLines: Int = 4,
+    inactiveMaxLines: Int = 2,
+    modifier: Modifier = Modifier
 ) {
     val baseStyle = if (active) {
-        MaterialTheme.typography.headlineLarge.copy(fontSize = 32.sp, lineHeight = 37.sp)
+        activeTextStyle ?: MaterialTheme.typography.headlineLarge.copy(fontSize = 32.sp, lineHeight = 37.sp)
     } else {
-        MaterialTheme.typography.titleLarge.copy(fontSize = 22.sp, lineHeight = 28.sp)
+        inactiveTextStyle ?: MaterialTheme.typography.titleLarge.copy(fontSize = 22.sp, lineHeight = 28.sp)
     }
     val fontWeight = if (active) FontWeight.Black else FontWeight.Bold
-    BoxWithConstraints(
-        modifier = Modifier.fillMaxWidth(),
-        contentAlignment = Alignment.CenterStart
-    ) {
-        val fullWidth = maxWidth
-        Text(
-            text = text,
-            color = if (active) Color.White.copy(alpha = 0.88f) else Color.White.copy(alpha = 0.72f),
-            style = baseStyle,
-            fontWeight = fontWeight,
-            textAlign = TextAlign.Start,
-            maxLines = if (active) 4 else 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.fillMaxWidth()
-        )
-        if (active) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth(progress.coerceIn(0f, 1f))
-                    .align(Alignment.CenterStart)
-                    .clipToBounds()
-            ) {
-                Text(
-                    text = text,
-                    color = Color.White,
-                    style = baseStyle,
-                    fontWeight = fontWeight,
-                    textAlign = TextAlign.Start,
-                    maxLines = 4,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
-                        .width(fullWidth)
-                        .background(
-                            Brush.horizontalGradient(
-                                listOf(
-                                    Color.Transparent,
-                                    accent.copy(alpha = 0.10f),
-                                    Color.Transparent
-                                )
-                            )
-                        )
-                )
+    val displayText = remember(text, active, progress, accent, activeTextColor, inactiveTextColor, unsungTextColor) {
+        if (!active) {
+            buildAnnotatedString {
+                withStyle(SpanStyle(color = inactiveTextColor)) {
+                    append(text)
+                }
+            }
+        } else {
+            val splitIndex = (text.length * progress.coerceIn(0f, 1f)).toInt().coerceIn(0, text.length)
+            buildAnnotatedString {
+                if (splitIndex > 0) {
+                    withStyle(SpanStyle(color = activeTextColor)) {
+                        append(text.substring(0, splitIndex))
+                    }
+                }
+                if (splitIndex < text.length) {
+                    withStyle(SpanStyle(color = unsungTextColor)) {
+                        append(text.substring(splitIndex))
+                    }
+                }
             }
         }
     }
+    Text(
+        text = displayText,
+        style = baseStyle,
+        fontWeight = fontWeight,
+        textAlign = textAlign,
+        maxLines = if (active) activeMaxLines else inactiveMaxLines,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier.fillMaxWidth()
+    )
 }
 
 @Composable
@@ -6837,7 +6836,6 @@ private fun ImmersiveLyrics(
 ) {
     val activeTextColor = if (dark) Color.White else Color(0xFF111111)
     val inactiveTextColor = if (dark) Color.White.copy(alpha = 0.72f) else Color(0xFF111111).copy(alpha = 0.56f)
-    val progressTrackColor = if (dark) Color.White.copy(alpha = 0.10f) else Color.Black.copy(alpha = 0.10f)
     val glowColor = if (dark) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primary.copy(alpha = 0.62f)
     val lyricItems = remember(lyrics, isLoading) {
         if (isLoading) {
@@ -6965,11 +6963,6 @@ private fun ImmersiveLyrics(
                 animationSpec = spring(dampingRatio = 0.82f, stiffness = 220f),
                 label = "lyric-padding"
             )
-            val animatedActiveProgress by animateFloatAsState(
-                targetValue = activeProgress,
-                animationSpec = tween(durationMillis = 220, easing = LinearEasing),
-                label = "lyric-progress"
-            )
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -6985,20 +6978,24 @@ private fun ImmersiveLyrics(
                     ),
                 horizontalAlignment = if (center) Alignment.CenterHorizontally else Alignment.Start
             ) {
-                Text(
+                AppleMusicLyricLineText(
                     text = lineText,
-                    color = if (isActive) activeTextColor else inactiveTextColor,
-                    style = if (isActive) activeTextStyle else inactiveTextStyle,
-                    fontWeight = if (isActive) FontWeight.Black else FontWeight.Bold,
+                    active = isActive,
+                    progress = activeProgress,
+                    accent = MaterialTheme.colorScheme.primary,
+                    activeTextColor = activeTextColor,
+                    inactiveTextColor = inactiveTextColor,
+                    unsungTextColor = activeTextColor.copy(alpha = if (dark) 0.38f else 0.30f),
+                    activeTextStyle = activeTextStyle,
+                    inactiveTextStyle = inactiveTextStyle,
                     textAlign = if (center) TextAlign.Center else TextAlign.Start,
-                    maxLines = when {
+                    activeMaxLines = when {
                         isActive && shouldHoldFocusLonger -> 9
                         isActive && shouldUseExpandedReading -> 8
                         isActive -> 6
-                        shouldUseExpandedReading -> 3
                         else -> 2
                     },
-                    overflow = TextOverflow.Ellipsis,
+                    inactiveMaxLines = if (shouldUseExpandedReading) 3 else 2,
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(
@@ -7011,23 +7008,6 @@ private fun ImmersiveLyrics(
                         )
                         .padding(horizontal = 10.dp, vertical = if (isActive) 10.dp else 6.dp)
                 )
-                if (isActive) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth(if (center) 0.68f else 0.42f)
-                            .padding(top = 8.dp)
-                            .height(3.dp)
-                            .clip(RoundedCornerShape(999.dp))
-                            .background(progressTrackColor)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth(animatedActiveProgress)
-                                .height(3.dp)
-                                .background(MaterialTheme.colorScheme.primary)
-                        )
-                    }
-                }
             }
         }
         item(key = "lyrics-bottom-spacer") {
