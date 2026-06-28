@@ -23,6 +23,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -34,6 +35,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -168,6 +170,7 @@ fun RowScope.KernelSuFloatingBottomBarItem(
 fun KernelSuFloatingBottomBar(
     modifier: Modifier = Modifier,
     selectedIndex: Int,
+    selectedPosition: Float? = null,
     onSelected: (index: Int) -> Unit,
     backdrop: Backdrop,
     tabsCount: Int,
@@ -175,10 +178,29 @@ fun KernelSuFloatingBottomBar(
     accentColor: Color,
     containerColor: Color,
     isBlurEnabled: Boolean = true,
+    useLiquidGlassFallback: Boolean = false,
     content: @Composable RowScope.() -> Unit
 ) {
     val pillShape = remember { CircleShape }
-    val surfaceColor = if (isBlurEnabled) containerColor.copy(alpha = 0.4f) else containerColor
+    val surfaceColor = when {
+        isBlurEnabled -> containerColor.copy(alpha = 0.4f)
+        useLiquidGlassFallback -> containerColor.copy(alpha = if (darkTheme) 0.54f else 0.68f)
+        else -> containerColor
+    }
+    val glassBaseBrush = Brush.verticalGradient(
+        listOf(
+            Color.White.copy(alpha = if (darkTheme) 0.20f else 0.74f),
+            surfaceColor,
+            Color.Black.copy(alpha = if (darkTheme) 0.16f else 0.04f)
+        )
+    )
+    val glassIndicatorBrush = Brush.verticalGradient(
+        listOf(
+            Color.White.copy(alpha = if (darkTheme) 0.24f else 0.78f),
+            accentColor.copy(alpha = if (darkTheme) 0.20f else 0.16f),
+            Color.Black.copy(alpha = if (darkTheme) 0.12f else 0.03f)
+        )
+    )
     val tabsBackdrop = rememberLayerBackdrop()
     val density = LocalDensity.current
     val isLtr = LocalLayoutDirection.current == LayoutDirection.Ltr
@@ -187,6 +209,8 @@ fun KernelSuFloatingBottomBar(
     var tabWidthPx by remember { mutableFloatStateOf(0f) }
     var totalWidthPx by remember { mutableFloatStateOf(0f) }
     var currentIndex by remember { mutableIntStateOf(selectedIndex) }
+    var isDockDragging by remember { mutableStateOf(false) }
+    var externalFollowLockedToIndex by remember { mutableStateOf<Int?>(null) }
 
     val panelOffset = 0f
 
@@ -215,9 +239,14 @@ fun KernelSuFloatingBottomBar(
                 }
                 globalTouchX in 0f..totalWidthPx
             },
-            onDragStarted = {},
+            onDragStarted = {
+                isDockDragging = true
+                externalFollowLockedToIndex = null
+            },
             onDragStopped = {
                 val targetIndex = targetValue.fastRoundToInt().coerceIn(0, tabsCount - 1)
+                isDockDragging = false
+                externalFollowLockedToIndex = targetIndex
                 currentIndex = targetIndex
                 animateToValue(targetIndex.toFloat())
             },
@@ -234,7 +263,20 @@ fun KernelSuFloatingBottomBar(
 
     LaunchedEffect(selectedIndex) {
         currentIndex = selectedIndex
-        dampedDragAnimation.animateToValue(selectedIndex.toFloat())
+        if (selectedPosition == null) {
+            dampedDragAnimation.animateToValue(selectedIndex.toFloat())
+        }
+    }
+    LaunchedEffect(selectedPosition) {
+        selectedPosition?.let { position ->
+            val lockedIndex = externalFollowLockedToIndex
+            if (isDockDragging) return@LaunchedEffect
+            if (lockedIndex != null && abs(position - lockedIndex) > 0.03f) {
+                return@LaunchedEffect
+            }
+            externalFollowLockedToIndex = null
+            dampedDragAnimation.updateValue(position.fastCoerceIn(0f, (tabsCount - 1).toFloat()))
+        }
     }
     LaunchedEffect(dampedDragAnimation, tabsCount) {
         snapshotFlow { currentIndex }.drop(1).collectLatest { index ->
@@ -307,7 +349,16 @@ fun KernelSuFloatingBottomBar(
                             onDrawSurface = { drawRect(surfaceColor) }
                         )
                     } else {
-                        Modifier.background(surfaceColor, pillShape)
+                        Modifier
+                            .clip(pillShape)
+                            .background(if (useLiquidGlassFallback) glassBaseBrush else Brush.linearGradient(listOf(surfaceColor, surfaceColor)), pillShape)
+                            .innerShadow(shape = pillShape) {
+                                InnerShadow(
+                                    radius = if (useLiquidGlassFallback) 9.dp else 0.dp,
+                                    color = Color.White.copy(alpha = if (darkTheme) 0.10f else 0.34f),
+                                    alpha = if (useLiquidGlassFallback) 1f else 0f
+                                )
+                            }
                     }
                 )
                 .then(if (isBlurEnabled) interactiveHighlight.modifier else Modifier)
@@ -408,10 +459,37 @@ fun KernelSuFloatingBottomBar(
                         .graphicsLayer {
                             val progressOffset = dampedDragAnimation.value * tabWidthPx
                             translationX = if (isLtr) progressOffset + panelOffset else -progressOffset + panelOffset
+                            if (useLiquidGlassFallback) {
+                                scaleX = dampedDragAnimation.scaleX
+                                scaleY = dampedDragAnimation.scaleY
+                            }
                         }
+                        .then(if (useLiquidGlassFallback) interactiveHighlight.gestureModifier else Modifier)
                         .then(dampedDragAnimation.modifier)
+                        .shadow(
+                            elevation = if (useLiquidGlassFallback) 8.dp else 0.dp,
+                            shape = pillShape,
+                            clip = false,
+                            ambientColor = accentColor.copy(alpha = if (darkTheme) 0.18f else 0.12f),
+                            spotColor = accentColor.copy(alpha = if (darkTheme) 0.18f else 0.12f)
+                        )
+                        .background(
+                            if (useLiquidGlassFallback) glassIndicatorBrush else Brush.linearGradient(
+                                listOf(
+                                    accentColor.copy(alpha = 0.15f),
+                                    accentColor.copy(alpha = 0.15f)
+                                )
+                            ),
+                            pillShape
+                        )
                         .clip(pillShape)
-                        .background(accentColor.copy(alpha = 0.15f), pillShape)
+                        .innerShadow(shape = pillShape) {
+                            InnerShadow(
+                                radius = 8.dp * dampedDragAnimation.pressProgress,
+                                color = Color.Black.copy(alpha = if (darkTheme) 0.18f else 0.10f),
+                                alpha = if (useLiquidGlassFallback) 0.75f else 0f
+                            )
+                        }
                         .height(56.dp)
                         .width(tabWidthDp)
                 )

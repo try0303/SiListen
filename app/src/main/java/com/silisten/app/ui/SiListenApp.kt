@@ -74,6 +74,9 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -453,7 +456,7 @@ private fun removeNativeGlassHost(activity: ComponentActivity, hostTag: String) 
     root.findViewWithTag<View>(hostTag)?.let(root::removeView)
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun SiListenApp(viewModel: SiListenViewModel) {
     val uiState = viewModel.uiState
@@ -468,6 +471,38 @@ fun SiListenApp(viewModel: SiListenViewModel) {
         drawContent()
     }
     val appearance = LocalSiListenAppearance.current
+    val mainTabs = remember { listOf(AppTab.Home, AppTab.Search, AppTab.Sources, AppTab.Account) }
+    val selectedMainTab = if (uiState.selectedTab in mainTabs) uiState.selectedTab else AppTab.Account
+    val selectedPage = mainTabs.indexOf(selectedMainTab).coerceAtLeast(0)
+    val pagerState = rememberPagerState(initialPage = selectedPage, pageCount = { mainTabs.size })
+    val pagerScope = rememberCoroutineScope()
+    val pagerPosition by remember {
+        derivedStateOf {
+            (pagerState.currentPage + pagerState.currentPageOffsetFraction)
+                .fastCoerceIn(0f, (mainTabs.size - 1).toFloat())
+        }
+    }
+    val pagerDrivenTab = mainTabs[pagerPosition.fastRoundToInt().coerceIn(0, mainTabs.lastIndex)]
+
+    LaunchedEffect(selectedPage) {
+        if (pagerState.currentPage != selectedPage) {
+            pagerState.animateScrollToPage(selectedPage)
+        }
+    }
+
+    val latestSettingsRoute = androidx.compose.runtime.rememberUpdatedState(uiState.settingsRoute)
+    val latestSelectedTab = androidx.compose.runtime.rememberUpdatedState(uiState.selectedTab)
+
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerState.settledPage }.collectLatest { page ->
+            if (latestSettingsRoute.value == SettingsRoute.Main) {
+                val targetTab = mainTabs.getOrNull(page) ?: AppTab.Home
+                if (latestSelectedTab.value != targetTab) {
+                    viewModel.selectTab(targetTab)
+                }
+            }
+        }
+    }
 
     BackHandler(
         enabled = uiState.themeSettings.predictiveBackEnabled &&
@@ -493,23 +528,109 @@ fun SiListenApp(viewModel: SiListenViewModel) {
                 modifier = Modifier
                     .matchParentSize()
                     .layerBackdrop(appBackdrop)
-                    .miuixLayerBackdrop(miuixAppBackdrop)
             ) {
                 Scaffold(
                     containerColor = Color.Transparent,
-                    bottomBar = {}
+                    bottomBar = {
+                        SiListenBottomChromeReserve(
+                            hasPlaybackChrome = viewModel.playbackState.currentSong != null ||
+                                viewModel.playbackState.errorMessage != null,
+                            hideNavDock = selectedPlaylist != null
+                        )
+                    }
                 ) { padding ->
-                    if (uiState.settingsRoute != SettingsRoute.Main) {
-                        SettingsScreen(uiState, viewModel, padding)
-                    } else {
-                        when (uiState.selectedTab) {
-                            AppTab.Home -> HomeScreen(uiState, viewModel, padding)
-                            AppTab.Search -> SearchScreen(uiState, viewModel, padding)
-                            AppTab.Sources -> SourcesScreen(uiState, viewModel, padding)
-                            AppTab.Account -> AccountScreen(viewModel, padding)
-                            AppTab.Settings -> AccountScreen(viewModel, padding)
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        if (uiState.settingsRoute != SettingsRoute.Main) {
+                            SettingsScreen(uiState, viewModel, padding)
+                        } else {
+                            HorizontalPager(
+                                state = pagerState,
+                                beyondViewportPageCount = 1,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .then(
+                                        if (appearance.floatingBottomBarEnabled &&
+                                            appearance.blurEnabled &&
+                                            appearance.floatingBottomBarBlurEnabled
+                                        ) {
+                                            Modifier.miuixLayerBackdrop(miuixAppBackdrop)
+                                        } else {
+                                            Modifier
+                                        }
+                                    )
+                            ) { page ->
+                                when (mainTabs[page]) {
+                                    AppTab.Home -> HomeScreen(uiState, viewModel, padding)
+                                    AppTab.Search -> SearchScreen(uiState, viewModel, padding)
+                                    AppTab.Sources -> SourcesScreen(uiState, viewModel, padding)
+                                    AppTab.Account -> AccountScreen(viewModel, padding)
+                                    AppTab.Settings -> AccountScreen(viewModel, padding)
+                                }
+                            }
+                        }
+
+                        if (selectedPlaylist != null) {
+                            PlaylistDetailScreen(
+                                playlist = selectedPlaylist,
+                                route = uiState.selectedPlaylistRoute,
+                                songSearchQuery = uiState.playlistSongSearchQuery,
+                                isLoading = uiState.isPlaylistDetailLoading,
+                                message = uiState.playlistDetailMessage,
+                                commentSort = uiState.playlistCommentSort,
+                                comments = uiState.playlistComments,
+                                commentCount = uiState.playlistCommentCount,
+                                isCommentsLoading = uiState.isPlaylistCommentsLoading,
+                                commentsMessage = uiState.playlistCommentsMessage,
+                                isSubscribed = viewModel.isSelectedPlaylistSubscribed(),
+                                isSubscriptionLoading = uiState.isPlaylistSubscriptionLoading,
+                                dark = resolvedDark,
+                                glassy = appearance.blurEnabled,
+                                onBack = {
+                                    if (uiState.selectedPlaylistRoute == PlaylistRoute.Comments) {
+                                        viewModel.showPlaylistOverview()
+                                    } else {
+                                        viewModel.closePlaylist()
+                                    }
+                                },
+                                onPlayAll = { viewModel.playSelectedPlaylist() },
+                                onSongClick = { song -> viewModel.playSong(song) },
+                                isSongLiked = viewModel::isSongLiked,
+                                isSongLikeLoading = viewModel::isSongLikeLoading,
+                                onToggleSongLike = viewModel::toggleSongLike,
+                                onToggleSubscription = viewModel::toggleSelectedPlaylistSubscription,
+                                onShowSongs = viewModel::showPlaylistOverview,
+                                onShowComments = viewModel::showPlaylistComments,
+                                onRefreshComments = viewModel::refreshPlaylistComments,
+                                onSongSearchQueryChange = viewModel::updatePlaylistSongSearchQuery,
+                                onCommentSortChange = viewModel::selectPlaylistCommentSort,
+                                reserveMiniPlayerSpace = hasActivePlayback
+                            )
                         }
                     }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .zIndex(20f)
+                ) {
+                    SiListenBottomChrome(
+                        viewModel = viewModel,
+                        hideNavDock = selectedPlaylist != null,
+                        backdrop = appBackdrop,
+                        miuixBackdrop = miuixAppBackdrop,
+                        selected = if (uiState.settingsRoute == SettingsRoute.Main) pagerDrivenTab else selectedMainTab,
+                        selectedPosition = if (uiState.settingsRoute == SettingsRoute.Main) pagerPosition else null,
+                        onSelect = { tab ->
+                            val index = mainTabs.indexOf(tab)
+                            viewModel.selectTab(tab)
+                            if (index >= 0) {
+                                pagerScope.launch {
+                                    pagerState.animateScrollToPage(index)
+                                }
+                            }
+                        }
+                    )
                 }
             }
 
@@ -545,50 +666,37 @@ fun SiListenApp(viewModel: SiListenViewModel) {
                 }
             }
 
-            if (selectedPlaylist != null) {
-                PlaylistDetailScreen(
-                    playlist = selectedPlaylist,
-                    route = uiState.selectedPlaylistRoute,
-                    songSearchQuery = uiState.playlistSongSearchQuery,
-                    isLoading = uiState.isPlaylistDetailLoading,
-                    message = uiState.playlistDetailMessage,
-                    commentSort = uiState.playlistCommentSort,
-                    comments = uiState.playlistComments,
-                    commentCount = uiState.playlistCommentCount,
-                    isCommentsLoading = uiState.isPlaylistCommentsLoading,
-                    commentsMessage = uiState.playlistCommentsMessage,
-                    isSubscribed = viewModel.isSelectedPlaylistSubscribed(),
-                    isSubscriptionLoading = uiState.isPlaylistSubscriptionLoading,
-                    dark = resolvedDark,
-                    glassy = appearance.blurEnabled,
-                    onBack = {
-                        if (uiState.selectedPlaylistRoute == PlaylistRoute.Comments) {
-                            viewModel.showPlaylistOverview()
-                        } else {
-                            viewModel.closePlaylist()
-                        }
-                    },
-                    onPlayAll = { viewModel.playSelectedPlaylist() },
-                    onSongClick = { song -> viewModel.playSong(song) },
-                    isSongLiked = viewModel::isSongLiked,
-                    isSongLikeLoading = viewModel::isSongLikeLoading,
-                    onToggleSongLike = viewModel::toggleSongLike,
-                    onToggleSubscription = viewModel::toggleSelectedPlaylistSubscription,
-                    onShowSongs = viewModel::showPlaylistOverview,
-                    onShowComments = viewModel::showPlaylistComments,
-                    onRefreshComments = viewModel::refreshPlaylistComments,
-                    onSongSearchQueryChange = viewModel::updatePlaylistSongSearchQuery,
-                    onCommentSortChange = viewModel::selectPlaylistCommentSort,
-                    reserveMiniPlayerSpace = hasActivePlayback
-                )
-            }
+    }
+}
 
-            SiListenBottomChrome(
-                viewModel = viewModel,
-                hideNavDock = selectedPlaylist != null,
-                backdrop = appBackdrop,
-                miuixBackdrop = miuixAppBackdrop
+@Composable
+private fun SiListenBottomChromeReserve(
+    hasPlaybackChrome: Boolean,
+    hideNavDock: Boolean
+) {
+    val appearance = LocalSiListenAppearance.current
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        if (hasPlaybackChrome) {
+            Spacer(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(if (appearance.floatingBottomBarEnabled) 92.dp else 84.dp)
             )
+        }
+        if (!hideNavDock) {
+            Spacer(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(if (appearance.floatingBottomBarEnabled) 88.dp else 72.dp)
+            )
+        } else if (hasPlaybackChrome) {
+            Spacer(modifier = Modifier.height(8.dp))
+        }
     }
 }
 
@@ -597,7 +705,10 @@ fun SiListenBottomChrome(
     viewModel: SiListenViewModel,
     hideNavDock: Boolean = false,
     backdrop: LayerBackdrop? = null,
-    miuixBackdrop: MiuixLayerBackdrop? = null
+    miuixBackdrop: MiuixLayerBackdrop? = null,
+    selected: AppTab = viewModel.uiState.selectedTab,
+    selectedPosition: Float? = null,
+    onSelect: (AppTab) -> Unit = viewModel::selectTab
 ) {
     val uiState = viewModel.uiState
     val playback = viewModel.playbackState
@@ -614,20 +725,20 @@ fun SiListenBottomChrome(
     var miniPlayerSize by remember { mutableStateOf(IntSize.Zero) }
     var navSize by remember { mutableStateOf(IntSize.Zero) }
 
-    Box(
+    Column(
         modifier = Modifier
-            .fillMaxSize()
-            .navigationBarsPadding()
+            .fillMaxWidth()
+            .navigationBarsPadding(),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
         if (playback.currentSong != null || playback.errorMessage != null) {
             Column(
                 modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .zIndex(3f)
+                    .fillMaxWidth()
                     .padding(
                         start = if (appearance.floatingBottomBarEnabled) 12.dp else 0.dp,
                         end = if (appearance.floatingBottomBarEnabled) 12.dp else 0.dp,
-                        bottom = if (hideNavDock) 8.dp else 86.dp
+                        bottom = if (hideNavDock) 8.dp else 0.dp
                     ),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -653,7 +764,6 @@ fun SiListenBottomChrome(
         } else {
             Spacer(
                 modifier = Modifier
-                    .align(Alignment.BottomCenter)
                     .onSizeChanged { miniPlayerSize = it }
             )
         }
@@ -661,17 +771,14 @@ fun SiListenBottomChrome(
         if (!hideNavDock) {
             Box(
                 modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .zIndex(2f)
                     .padding(
                         horizontal = if (appearance.floatingBottomBarEnabled) 12.dp else 0.dp,
                         vertical = if (appearance.floatingBottomBarEnabled) 8.dp else 0.dp
                     )
             ) {
                 SiListenNav(
-                    selected = uiState.selectedTab,
-                    onSelect = viewModel::selectTab,
-                    onSearch = { viewModel.selectTab(AppTab.Search) },
+                    selected = selected,
+                    onSelect = onSelect,
                     darkTheme = resolvedDark,
                     barShape = barShape,
                     containerColor = barContainer,
@@ -681,13 +788,13 @@ fun SiListenBottomChrome(
                     floatingBottomBarBlurEnabled = appearance.floatingBottomBarBlurEnabled,
                     backdrop = miuixBackdrop,
                     miuixBackdrop = miuixBackdrop,
+                    selectedPosition = selectedPosition,
                     onMeasured = { navSize = it }
                 )
             }
         } else {
             Spacer(
                 modifier = Modifier
-                    .align(Alignment.BottomCenter)
                     .onSizeChanged { navSize = it }
             )
         }
@@ -2783,7 +2890,7 @@ private fun SettingsHomeScreen(
         item {
             SettingsNavigationRow(
                 title = "赞赏开发者",
-                subtitle = "待配置收款码；配置后可在这里展示赞赏入口",
+                subtitle = "赞赏入口还没有设置，稍后可以在这里展示支持方式",
                 mark = "￥",
                 markColor = Color(0xFFFFC857),
                 cardColor = cardColor,
@@ -3035,7 +3142,7 @@ private fun LyricStageParticles() {
 private fun SiListenNav(
     selected: AppTab,
     onSelect: (AppTab) -> Unit,
-    onSearch: () -> Unit,
+    selectedPosition: Float?,
     darkTheme: Boolean,
     barShape: Shape,
     containerColor: Color,
@@ -3058,6 +3165,7 @@ private fun SiListenNav(
     if (backdrop != null) {
         KernelSuFloatingBottomBar(
             selectedIndex = selectedIndex,
+            selectedPosition = selectedPosition,
             onSelected = { index -> onSelect(tabs[index].first) },
             backdrop = backdrop,
             tabsCount = tabs.size,
@@ -3065,6 +3173,7 @@ private fun SiListenNav(
             accentColor = MaterialTheme.colorScheme.primary,
             containerColor = if (containerColor != Color.Unspecified) containerColor else barColor,
             isBlurEnabled = floating && blurEnabled && floatingBottomBarBlurEnabled,
+            useLiquidGlassFallback = false,
             modifier = Modifier.onSizeChanged(onMeasured)
         ) {
             tabs.forEachIndexed { index, (tab, label) ->
@@ -3235,7 +3344,7 @@ private fun KernelSuUiModePreference(
                 color = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111),
                 fontWeight = FontWeight.Bold
             )
-            Text("复刻 KernelSU 的 Miuix / Material 切换", color = mutedText, style = MaterialTheme.typography.bodySmall)
+            Text("选择更喜欢的界面质感", color = mutedText, style = MaterialTheme.typography.bodySmall)
         }
         Row(
             modifier = Modifier
@@ -3342,9 +3451,9 @@ private fun ThemeSettingsScreen(
                 ThemeToggleItem(
                     title = "动态取色",
                     subtitle = if (state.uiMode == ThemeUiModeOption.Miuix) {
-                        "对应 KernelSU 的 Miuix 动态取色；开启后使用下方关键色和算法生成主题"
+                        "开启后会根据关键色生成更统一的界面配色"
                     } else {
-                        "对应 KernelSU 的动态色彩模式；开启后使用关键色驱动主题"
+                        "开启后会使用关键色调整按钮、卡片和强调色"
                     },
                     mark = "?",
                     checked = state.monetEnabled,
@@ -3402,7 +3511,7 @@ private fun ThemeSettingsScreen(
             ThemeSettingsGroup(containerColor = panelColor) {
                 ThemeToggleItem(
                     title = "启用模糊",
-                    subtitle = "对应 KernelSU 的 enableBlur",
+                    subtitle = "让卡片和底部区域呈现柔和的半透明质感",
                     mark = "?",
                     checked = state.blurEnabled,
                     onCheckedChange = onBlurChange,
@@ -3412,7 +3521,7 @@ private fun ThemeSettingsScreen(
                 ThemeDivider(dividerColor)
                 ThemeToggleItem(
                     title = "悬浮底栏",
-                    subtitle = "对应 KernelSU 的 enableFloatingBottomBar",
+                    subtitle = "使用更轻盈的悬浮式底部导航",
                     mark = "▔",
                     checked = state.floatingBottomBarEnabled,
                     onCheckedChange = onFloatingBottomBarChange,
@@ -3428,7 +3537,7 @@ private fun ThemeSettingsScreen(
                         ThemeDivider(dividerColor)
                         ThemeToggleItem(
                             title = "底栏玻璃",
-                            subtitle = "对应 KernelSU 的 enableFloatingBottomBarBlur",
+                            subtitle = "为底部导航加入玻璃模糊效果",
                             mark = "?",
                             checked = state.floatingBottomBarBlurEnabled,
                             onCheckedChange = onFloatingBottomBarBlurChange,
@@ -3527,8 +3636,8 @@ private fun DonationSettingsScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("待配置", color = titleColor, fontWeight = FontWeight.Black)
-                            Text("donate_qr", color = mutedColor, style = MaterialTheme.typography.bodySmall)
+                            Text("暂未设置", color = titleColor, fontWeight = FontWeight.Black)
+                            Text("设置后会显示赞赏二维码", color = mutedColor, style = MaterialTheme.typography.bodySmall)
                         }
                     }
                     Text(
@@ -4001,7 +4110,7 @@ private fun ThemeUiModeSelector(
                 fontWeight = FontWeight.Black
             )
             Text(
-                "复刻 KernelSU 的 Material / Miuix 主题设置入口。当前先切换 SiListen 的主题语义与预览，后续页面样式会继续向该模式收敛。",
+                "选择适合你的界面风格，预览会同步展示主要颜色和底部栏效果。",
                 color = if (dark) Color(0xFFAAC0B0) else Color(0xFF6A6D72),
                 style = MaterialTheme.typography.bodySmall
             )
@@ -4270,7 +4379,7 @@ private fun ThemeAdvancedColorOptions(
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Text("动态色算法", color = titleColor, fontWeight = FontWeight.Black)
             Text(
-                "对应 KernelSU 的色彩风格和色彩规范设置，用于控制关键色生成主题时的取色倾向。",
+                "调整关键色生成主题时的取色倾向，让界面更贴近你的偏好。",
                 color = mutedColor,
                 style = MaterialTheme.typography.bodySmall
             )
