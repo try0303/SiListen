@@ -482,7 +482,6 @@ fun SiListenApp(viewModel: SiListenViewModel) {
                 .fastCoerceIn(0f, (mainTabs.size - 1).toFloat())
         }
     }
-    val pagerDrivenTab = mainTabs[pagerPosition.fastRoundToInt().coerceIn(0, mainTabs.lastIndex)]
 
     LaunchedEffect(selectedPage) {
         if (pagerState.currentPage != selectedPage) {
@@ -619,7 +618,7 @@ fun SiListenApp(viewModel: SiListenViewModel) {
                         hideNavDock = selectedPlaylist != null,
                         backdrop = appBackdrop,
                         miuixBackdrop = miuixAppBackdrop,
-                        selected = if (uiState.settingsRoute == SettingsRoute.Main) pagerDrivenTab else selectedMainTab,
+                        selected = selectedMainTab,
                         selectedPosition = if (uiState.settingsRoute == SettingsRoute.Main) pagerPosition else null,
                         onSelect = { tab ->
                             val index = mainTabs.indexOf(tab)
