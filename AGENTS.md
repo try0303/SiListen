@@ -1,91 +1,99 @@
 # AGENTS.md
 
-## Project Goal
+## 项目目标
 
-Build SiListen into a stable, clean, Apple Music inspired Android music app with reliable playback, mini player, media notification controls, immersive lyrics, NetEase Cloud Music support, and a KernelSU-like liquid floating bottom dock.
+将 SiListen 打磨成一个稳定、简洁、具有 Apple Music 气质的 Android 音乐应用。核心体验包括可靠播放、底部迷你播放器、系统媒体通知控制、沉浸式歌词页、网易云音乐端内直连能力，以及接近 KernelSU/Miuix 质感的液态玻璃悬浮底栏。
 
-## Working Rules
+## 工作规则
 
-- Always inspect `git status --short` before editing.
-- Treat existing uncommitted changes as user work unless you made them in the current task.
-- Do not revert user changes without explicit permission.
-- Prefer small, verifiable edits.
-- Run `.\gradlew.bat assembleDebug` after Kotlin changes.
-- Install and check crash logs after risky UI, playback, notification, blur, or navigation changes.
-- Do not push unless the user asks.
+- 每次修改前都必须先查看 `git status --short`。
+- 未提交的现有改动默认视为用户改动，除非明确是本轮任务产生的内容。
+- 未经明确允许，不得回退、删除或覆盖用户已有改动。
+- 优先采用小步、可验证、可回退的修改方式。
+- Kotlin 代码变更后必须运行 `.\gradlew.bat assembleDebug`。
+- 涉及 UI、播放、通知、模糊、导航、返回手势等高风险改动后，需要安装到设备并检查崩溃日志。
+- 不得擅自推送到远端。
+- 只有在本人实际检测并确认无误后，才允许推送到远端。
 
-## UI Architecture
+## UI 架构
 
-- Keep `SiListenApp.kt` as the app shell only.
-- Put bottom dock and mini player changes in `BottomChrome.kt`.
-- Put player sheet, lyrics, queue, and player comments in `PlayerScreens.kt`.
-- Put playlist detail and playlist comments in `PlaylistScreens.kt`.
-- Put settings pages in `SettingsScreens.kt`.
-- Put home, search, library, account, login, QR, and local music in `HomeAccountScreens.kt`.
-- Put shared visual primitives in `CommonUi.kt`.
+- `SiListenApp.kt` 只保留应用壳、全局状态和页面编排，不再继续堆积具体页面实现。
+- 底部悬浮栏和迷你播放器相关改动放在 `BottomChrome.kt`。
+- 播放页、歌词、播放队列、评论、歌曲详情相关改动放在 `PlayerScreens.kt`。
+- 歌单详情和歌单评论相关改动放在 `PlaylistScreens.kt`。
+- 设置页、主题、外观、音源配置相关改动放在 `SettingsScreens.kt`。
+- 首页、搜索、音乐库、账号、登录、二维码、本地音乐相关改动放在 `HomeAccountScreens.kt`。
+- 通用视觉组件、颜色、玻璃容器、共享小组件放在 `CommonUi.kt`。
 
-## Design Direction
+## 设计方向
 
-- Use Apple Music as the primary product reference.
-- Keep the app simple, high-contrast, and readable.
-- Use glass, blur, and motion intentionally.
-- The liquid dock should follow the KernelSU/Miuix liquid-glass behavior where stable.
-- Do not over-blur text until it becomes unreadable.
-- Light and dark themes must both be checked.
+- 以 Apple Music 作为主要产品参考，追求简洁、沉浸、克制的视觉体验。
+- 所有文字必须在浅色和深色模式下都清晰可读。
+- 玻璃、模糊、透明和动效必须服务于可读性，不能把内容糊成马赛克。
+- 液态底栏应尽量贴近 KernelSU/Miuix 的液态玻璃行为和反馈。
+- 不得为了修复无关问题而直接删除液态底栏、迷你播放器或歌词入口。
+- 用户可见文案需要面向普通用户，不能暴露内部实现名。
 
-## Bottom Dock Rules
+## 底部栏规则
 
-- The dock is driven by `HorizontalPager`.
-- Tapping a dock item must land on the exact page.
-- Dragging the dock indicator must land on the exact page.
-- Swiping pages must move the dock indicator without lag.
-- Do not remove the liquid dock to fix unrelated bugs.
-- If MIUI native blur crashes, isolate backdrop sampling instead of deleting the feature.
+- 底部栏页面状态由 `HorizontalPager` 驱动。
+- 点击底部栏项目必须准确进入对应页面。
+- 拖动底部栏指示器必须准确落到对应页面。
+- 左右滑动页面时，底部栏指示器必须同步移动，不能慢一拍。
+- 深色模式下底栏背景应偏黑色透明，浅色模式下应偏白灰透明。
+- 液态轮廓需要有柔和的大小变化、透明感和玻璃感，不能暴露方正矩形边界。
+- 如果 MIUI 原生模糊引发崩溃，应隔离 backdrop 采样范围，而不是删除液态效果。
 
-## Mini Player Rules
+## 迷你播放器规则
 
-- The mini player must appear whenever a song is active.
-- It should stay above the dock.
-- It should open lyrics/player when tapped.
-- It should not cover important text with avoidable hard clipping.
+- 只要当前有歌曲，迷你播放器就必须出现。
+- 迷你播放器应显示在底部栏上方。
+- 点击迷你播放器应进入播放页或歌词页。
+- 歌名和歌手信息不能被圆角或裁剪遮挡。
+- 迷你播放器需要有半透明、半模糊的玻璃质感，但仍要保证文字可读。
 
-## Lyrics Rules
+## 歌词规则
 
-- Apple Music style lyrics are the default target.
-- Current lyric should be centered, large, bold, and readable.
-- Non-current lyrics should fade with distance.
-- Avoid duplicate rendering of full-line and word-highlight text.
-- Particle lyrics are an optional mode and should remain simple.
+- 默认目标是 Android 平台的 Apple Music 风格歌词页。
+- 歌词页应全屏沉浸，背景使用歌曲封面模糊并叠加渐变。
+- 当前歌词行固定在屏幕垂直中心附近，字号更大、加粗、白色高亮。
+- 非当前歌词需要灰色、半透明、随距离逐渐淡出。
+- 播放时歌词滚动必须平滑，当前行保持居中锚定。
+- 逐字高亮只能绘制一套文本，避免完整歌词和逐字歌词重叠。
+- 点击歌词行应跳转到对应播放时间点。
+- 底部进度条拖动时，歌词需要同步跳转。
+- 粒子歌词是可选风格，必须保持简洁，不影响默认歌词页稳定性。
 
-## Network And Login Rules
+## 网络与登录规则
 
-- Prefer end-user friendly direct client behavior.
-- Do not require a local API server for normal usage.
-- Keep local API URLs as fallback/testing configuration only.
-- Login failures should explain the next action in Chinese.
-- Opening NetEase confirmation should target the NetEase Cloud Music app, not a browser, when possible.
+- 正常使用不应依赖用户手动启动本地 API 服务。
+- 本地 API 地址只作为调试、备用或高级配置。
+- 网易云登录失败时，需要用中文给出可执行的下一步提示。
+- 能打开网易云音乐 App 时，应优先打开 App 完成确认，不应默认打开网页。
+- 网络错误、二维码失败、Cookie 失效等提示必须让普通用户看得懂。
 
-## Notification Rules
+## 通知栏规则
 
-- Use Android media notification controls.
-- Notification actions must map to previous, play/pause, next, and dismiss.
-- Notification tap should open the player/lyrics flow.
-- Always test notification behavior after playback controller changes.
+- 使用 Android 标准媒体通知控制器。
+- 通知动作应对应上一首、播放/暂停、下一首、关闭。
+- 点击通知应进入播放页或歌词页流程。
+- 修改播放控制、服务、通知后必须实际测试通知行为。
 
-## User-Facing Text
+## 用户文案规则
 
-- User-visible text should be Chinese.
-- Do not show implementation names such as `enableFloatingBottomBar`, `donate_qr`, or internal API details.
-- Error messages should be practical and calm.
+- 用户可见文本默认使用中文。
+- 不得在界面中显示 `enableFloatingBottomBar`、`donate_qr`、内部 API 名称等实现细节。
+- 错误提示应平静、明确、能指导用户下一步操作。
+- 调试信息只能出现在日志或开发配置中，不应出现在正式界面。
 
-## Verification Checklist
+## 验证清单
 
-- `git status --short`
-- `.\gradlew.bat assembleDebug`
-- App launches on device.
-- No new `logcat -b crash` entries.
-- Dock tap, dock drag, and page swipe all work.
-- Mini player appears after playback starts.
-- Player sheet opens lyrics, queue, comments, and detail pages.
-- Settings remain readable in light and dark modes.
-
+- 查看 `git status --short`。
+- Kotlin 变更后运行 `.\gradlew.bat assembleDebug`。
+- 高风险变更后安装到设备并启动应用。
+- 检查是否有新的 `logcat -b crash` 崩溃记录。
+- 验证底部栏点击、拖动、页面滑动都能准确切页。
+- 验证播放歌曲后迷你播放器出现。
+- 验证点击迷你播放器可以进入播放页或歌词页。
+- 验证播放页的歌词、队列、评论、详情入口正常。
+- 验证浅色和深色模式下主要标题、列表、按钮、设置项都可读。
