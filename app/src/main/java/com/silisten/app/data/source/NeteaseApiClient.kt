@@ -1,0 +1,414 @@
+package com.silisten.app.data.source
+
+import android.content.Context
+import android.content.SharedPreferences
+import android.graphics.Bitmap
+import android.graphics.Color
+import android.util.Base64
+import android.util.Log
+import com.silisten.app.BuildConfig
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.qrcode.QRCodeWriter
+import java.io.ByteArrayOutputStream
+import java.net.URLEncoder
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import okhttp3.Cookie
+import okhttp3.CookieJar
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONArray
+import org.json.JSONObject
+
+data class NeteaseUser(
+    val userId: Long,
+    val nickname: String,
+    val avatarUrl: String
+)
+
+data class NeteaseLoginState(
+    val loggedIn: Boolean = false,
+    val user: NeteaseUser? = null,
+    val message: String = "尚未登录网易云音乐"
+)
+
+data class NeteaseActionResult(
+    val success: Boolean,
+    val message: String
+)
+
+data class NeteaseQrLoginCode(
+    val key: String,
+    val qrUrl: String,
+    val qrImg: String,
+    val message: String
+)
+
+data class NeteaseQrLoginCheck(
+    val code: Int,
+    val message: String,
+    val loginState: NeteaseLoginState? = null
+)
+
+class NeteaseApiClient(
+    context: Context,
+    private val baseUrls: List<String> = defaultBaseUrls()
+) {
+    private val preferences = context.getSharedPreferences("netease_auth", Context.MODE_PRIVATE)
+    private val cookieJar = PersistentCookieJar(preferences)
+    private val directClient = NeteaseDirectApiClient(cookieJar)
+
+    @Volatile
+    private var activeBaseUrl: String = preferences
+        .getString(KEY_ACTIVE_BASE_URL, null)
+        ?.takeIf { it in baseUrls }
+        ?: baseUrls.first()
+
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(1500, TimeUnit.MILLISECONDS)
+        .readTimeout(6, TimeUnit.SECONDS)
+        .writeTimeout(1500, TimeUnit.MILLISECONDS)
+        .retryOnConnectionFailure(true)
+        .cookieJar(cookieJar)
+        .build()
+
+    suspend fun sendSmsCode(phone: String): NeteaseActionResult = withContext(Dispatchers.IO) {
+        val json = getJson("/captcha/sent?phone=${phone.encode()}&ctcode=86&timestamp=${System.currentTimeMillis()}")
+        val success = json.optInt("code") == 200 && json.optBoolean("data", true)
+        NeteaseActionResult(
+            success = success,
+            message = if (success) {
+                "验证码已发送，请留意网易云短信"
+            } else {
+                shortError(json.optString("message", "验证码发送失败，可能触发了网易云风控"))
+            }
+        )
+    }
+
+    suspend fun loginBySms(phone: String, captcha: String): NeteaseLoginState = withContext(Dispatchers.IO) {
+        val json = getJson(
+            "/login/cellphone?phone=${phone.encode()}&captcha=${captcha.encode()}&ctcode=86&timestamp=${System.currentTimeMillis()}"
+        )
+        if (json.optInt("code") != 200) {
+            return@withContext NeteaseLoginState(
+                loggedIn = false,
+                user = null,
+                message = shortError(json.optString("message", "登录失败，请检查手机号或验证码"))
+            )
+        }
+        json.optString("cookie").takeIf { it.isNotBlank() }?.let { cookieJar.saveCookieHeader(it, activeHttpUrl()) }
+        val user = json.optJSONObject("profile")?.toUser()
+        if (user != null) {
+            saveUser(user)
+            NeteaseLoginState(true, user, "网易云音乐登录成功")
+        } else {
+            refreshLoginState()
+        }
+    }
+
+    suspend fun createQrLoginCode(): NeteaseQrLoginCode = withContext(Dispatchers.IO) {
+        val keyJson = getJson("/login/qr/key?timestamp=${System.currentTimeMillis()}")
+        val key = keyJson.optJSONObject("data")?.optString("unikey").orEmpty()
+            .ifBlank { keyJson.optString("unikey").orEmpty() }
+        if (key.isBlank()) error(shortError(keyJson.optString("message", "二维码 key 获取失败")))
+
+        val qrJson = runCatching {
+            getJson("/login/qr/create?key=${key.encode()}&qrimg=true&timestamp=${System.currentTimeMillis()}")
+        }.getOrNull()
+        val data = qrJson?.optJSONObject("data")
+        val qrUrl = data?.optString("qrurl").orEmpty()
+            .ifBlank { "https://music.163.com/login?codekey=$key" }
+        NeteaseQrLoginCode(
+            key = key,
+            qrUrl = qrUrl,
+            qrImg = data?.optString("qrimg").orEmpty().ifBlank { generateQrDataUrl(qrUrl) },
+            message = "请使用网易云音乐 App 扫码登录"
+        )
+    }
+
+    suspend fun createQrLoginCodeLocal(): NeteaseQrLoginCode = withContext(Dispatchers.IO) {
+        val keyJson = getJson("/login/qr/key?timestamp=${System.currentTimeMillis()}")
+        val key = keyJson.optJSONObject("data")?.optString("unikey").orEmpty()
+            .ifBlank { keyJson.optString("unikey").orEmpty() }
+        if (key.isBlank()) error(shortError(keyJson.optString("message", "二维码 key 获取失败")))
+        val qrUrl = "https://music.163.com/login?codekey=$key"
+        NeteaseQrLoginCode(
+            key = key,
+            qrUrl = qrUrl,
+            qrImg = generateQrDataUrl(qrUrl),
+            message = "请使用网易云音乐 App 扫码登录"
+        )
+    }
+
+    suspend fun checkQrLogin(key: String): NeteaseQrLoginCheck = withContext(Dispatchers.IO) {
+        val timestamp = System.currentTimeMillis()
+        val json = runCatching {
+            getJson("/login/qr/check?key=${key.encode()}&timestamp=$timestamp")
+        }.getOrElse {
+            getJson("/login/qr/check?key=${key.encode()}&noCookie=true&timestamp=$timestamp")
+        }.let { first ->
+            if (first.optInt("code") == 502) {
+                runCatching {
+                    getJson("/login/qr/check?key=${key.encode()}&noCookie=true&timestamp=$timestamp")
+                }.getOrDefault(first)
+            } else {
+                first
+            }
+        }
+        val code = json.optInt("code")
+        val message = when (code) {
+            800 -> "二维码已过期，请重新生成"
+            801 -> "等待扫码"
+            802 -> "已扫码，请在手机上确认登录"
+            803 -> "登录成功"
+            else -> shortError(json.optString("message", "二维码状态未知：$code"))
+        }
+        if (code == 803) {
+            json.optString("cookie").takeIf { it.isNotBlank() }?.let { cookieJar.saveCookieHeader(it, activeHttpUrl()) }
+            return@withContext NeteaseQrLoginCheck(code, message, refreshLoginState())
+        }
+        NeteaseQrLoginCheck(code, message)
+    }
+
+    suspend fun refreshLoginState(): NeteaseLoginState = withContext(Dispatchers.IO) {
+        val localUser = loadUser()
+        val json = runCatching {
+            getJson("/login/status?timestamp=${System.currentTimeMillis()}")
+        }.getOrNull()
+        val remoteUser = json?.optJSONObject("data")?.optJSONObject("profile")?.toUser()
+        val user = remoteUser ?: if (json == null) localUser else null
+        if (remoteUser != null) {
+            saveUser(remoteUser)
+            NeteaseLoginState(true, remoteUser, "已登录网易云音乐")
+        } else if (json == null && localUser != null) {
+            NeteaseLoginState(true, localUser, "当前离线，先使用上次登录信息")
+        } else if (user != null) {
+            NeteaseLoginState(true, user, "已登录网易云音乐")
+        } else {
+            preferences.edit().remove("user_id").remove("nickname").remove("avatar_url").apply()
+            NeteaseLoginState(false, null, "尚未登录网易云音乐")
+        }
+    }
+
+    suspend fun logout(): NeteaseLoginState = withContext(Dispatchers.IO) {
+        runCatching { getJson("/logout?timestamp=${System.currentTimeMillis()}") }
+        cookieJar.clear()
+        preferences.edit()
+            .remove("user_id")
+            .remove("nickname")
+            .remove("avatar_url")
+            .remove(KEY_ACTIVE_BASE_URL)
+            .apply()
+        NeteaseLoginState(false, null, "已退出网易云音乐")
+    }
+
+    suspend fun getJson(pathAndQuery: String, raceGateways: Boolean = true): JSONObject = withContext(Dispatchers.IO) {
+        JSONObject(requestTextWithFallback(pathAndQuery, raceGateways))
+    }
+
+    suspend fun getJsonArray(pathAndQuery: String, raceGateways: Boolean = true): JSONArray = withContext(Dispatchers.IO) {
+        JSONArray(requestTextWithFallback(pathAndQuery, raceGateways))
+    }
+
+    private fun requestTextWithFallback(pathAndQuery: String, raceGateways: Boolean): String {
+        if (!pathAndQuery.startsWith("http")) {
+            runCatching { directClient.requestText(pathAndQuery) }
+                .onSuccess {
+                    Log.d(TAG, "Direct Netease request succeeded: $pathAndQuery")
+                    return it
+                }
+                .onFailure { Log.w(TAG, "Direct Netease request failed: $pathAndQuery", it) }
+        }
+        val candidates = if (pathAndQuery.startsWith("http")) {
+            listOf(pathAndQuery)
+        } else {
+            prioritizedBaseUrls().map { "$it$pathAndQuery" }
+        }
+        return requestTextSequential(candidates, pathAndQuery)
+    }
+
+    private fun requestTextSequential(candidates: List<String>, pathAndQuery: String): String {
+        var lastError: Throwable? = null
+        for (candidate in candidates) {
+            val text = runCatching { requestText(candidate) }
+                .onSuccess {
+                    if (!pathAndQuery.startsWith("http")) {
+                        rememberActiveBaseUrl(candidate.substringBefore(pathAndQuery))
+                    }
+                }
+                .getOrElse {
+                    lastError = it
+                    null
+                }
+            if (text != null) return text
+        }
+        error(shortError(lastError?.message.orEmpty().ifBlank { "网易云接口暂时不可用" }))
+    }
+
+    private fun requestText(url: String): String {
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", "Mozilla/5.0 SiListen/0.2 Android")
+            .header("Referer", "https://music.163.com/")
+            .build()
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) error("HTTP ${response.code}")
+            return response.body?.string().orEmpty()
+        }
+    }
+
+    private fun prioritizedBaseUrls(): List<String> = buildList {
+        add(activeBaseUrl)
+        baseUrls.filterNot { it == activeBaseUrl }.forEach(::add)
+    }
+
+    private fun rememberActiveBaseUrl(url: String) {
+        if (activeBaseUrl == url) return
+        activeBaseUrl = url
+        preferences.edit().putString(KEY_ACTIVE_BASE_URL, url).apply()
+    }
+
+    private fun activeHttpUrl(): HttpUrl = activeBaseUrl.toHttpUrl()
+
+    private fun JSONObject.toUser(): NeteaseUser? {
+        val id = optLong("userId", 0L)
+        if (id == 0L) return null
+        return NeteaseUser(
+            userId = id,
+            nickname = optString("nickname", "网易云用户"),
+            avatarUrl = optString("avatarUrl", "")
+        )
+    }
+
+    private fun saveUser(user: NeteaseUser) {
+        preferences.edit()
+            .putLong("user_id", user.userId)
+            .putString("nickname", user.nickname)
+            .putString("avatar_url", user.avatarUrl)
+            .apply()
+    }
+
+    private fun loadUser(): NeteaseUser? {
+        val id = preferences.getLong("user_id", 0L)
+        if (id == 0L) return null
+        return NeteaseUser(
+            userId = id,
+            nickname = preferences.getString("nickname", "网易云用户").orEmpty(),
+            avatarUrl = preferences.getString("avatar_url", "").orEmpty()
+        )
+    }
+
+    private fun String.encode(): String = URLEncoder.encode(this, "UTF-8")
+
+    private fun generateQrDataUrl(content: String, size: Int = 720): String {
+        val matrix = QRCodeWriter().encode(content, BarcodeFormat.QR_CODE, size, size)
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        for (x in 0 until size) {
+            for (y in 0 until size) {
+                bitmap.setPixel(x, y, if (matrix[x, y]) Color.BLACK else Color.WHITE)
+            }
+        }
+        val output = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)
+        return "data:image/png;base64,${Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)}"
+    }
+
+    private fun shortError(message: String): String {
+        val cleaned = message.replace(Regex("\\s+"), " ").trim()
+        return when {
+            cleaned.isBlank() -> "请求失败，请稍后重试"
+            cleaned.contains("failed to connect", ignoreCase = true) ||
+                cleaned.contains("connection refused", ignoreCase = true) ->
+                "网易云接口连接失败，端内直连与本地兜底都不可用"
+            cleaned.contains("timeout", ignoreCase = true) ->
+                "网易云接口响应超时，请稍后重试"
+            cleaned.length > 34 -> cleaned.take(34) + "..."
+            else -> cleaned
+        }
+    }
+
+    private companion object {
+        private const val TAG = "NeteaseApiClient"
+        private const val KEY_ACTIVE_BASE_URL = "active_base_url"
+
+        fun defaultBaseUrls(): List<String> = buildList {
+            listOf(
+                BuildConfig.NETEASE_API_LAN_BASE_URL,
+                BuildConfig.NETEASE_API_EMULATOR_BASE_URL,
+                BuildConfig.NETEASE_API_LOOPBACK_BASE_URL
+            )
+                .map { it.trim().trimEnd('/') }
+                .filter { it.isNotBlank() }
+                .distinct()
+                .forEach(::add)
+            if (isEmpty()) {
+                add("http://127.0.0.1:3000")
+            }
+        }
+    }
+}
+
+internal class PersistentCookieJar(
+    private val preferences: SharedPreferences
+) : CookieJar {
+    override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+        if (cookies.isEmpty()) return
+        val existing = loadCookieMap().toMutableMap()
+        cookies.forEach { existing[it.name] = it.value }
+        saveCookieMap(existing)
+    }
+
+    override fun loadForRequest(url: HttpUrl): List<Cookie> {
+        return loadCookieMap().map { (name, value) ->
+            Cookie.Builder()
+                .domain(url.host)
+                .path("/")
+                .name(name)
+                .value(value)
+                .build()
+        }
+    }
+
+    fun saveCookieHeader(cookieHeader: String, url: HttpUrl) {
+        val ignoredKeys = setOf("path", "max-age", "expires", "domain", "httponly", "secure", "samesite")
+        val parsed = cookieHeader.split(";").mapNotNull { part ->
+            val pieces = part.trim().split("=", limit = 2)
+            val name = pieces.getOrNull(0).orEmpty()
+            val value = pieces.getOrNull(1).orEmpty()
+            if (pieces.size != 2 || name.lowercase() in ignoredKeys) {
+                null
+            } else {
+                name to value
+            }
+        }
+        val existing = loadCookieMap().toMutableMap()
+        parsed.forEach { (name, value) -> existing[name] = value }
+        saveCookieMap(existing)
+    }
+
+    fun cookieValue(name: String): String? = loadCookieMap()[name]
+
+    fun clear() {
+        preferences.edit().remove("cookies").apply()
+    }
+
+    private fun loadCookieMap(): Map<String, String> {
+        return preferences.getStringSet("cookies", emptySet()).orEmpty()
+            .mapNotNull { raw ->
+                val pieces = raw.split("=", limit = 2)
+                val name = pieces.getOrNull(0).orEmpty()
+                val value = pieces.getOrNull(1).orEmpty()
+                if (name.isBlank()) null else name to value
+            }
+            .toMap()
+    }
+
+    private fun saveCookieMap(cookies: Map<String, String>) {
+        preferences.edit()
+            .putStringSet("cookies", cookies.map { (name, value) -> "$name=$value" }.toSet())
+            .apply()
+    }
+}

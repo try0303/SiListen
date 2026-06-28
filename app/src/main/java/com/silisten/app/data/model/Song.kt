@@ -1,0 +1,83 @@
+package com.silisten.app.data.model
+
+data class Song(
+    val id: String,
+    val title: String,
+    val artist: String,
+    val album: String,
+    val coverUrl: String,
+    val durationMs: Long = 0L,
+    val sourceId: String,
+    val streamHint: String? = null
+)
+
+data class MusicPlaylist(
+    val id: String,
+    val title: String,
+    val subtitle: String,
+    val coverUrl: String,
+    val songs: List<Song>,
+    val kind: PlaylistKind = PlaylistKind.Playlist
+)
+
+enum class PlaylistKind {
+    Playlist,
+    DailyDiscovery,
+    PersonalFm,
+    Podcast,
+    CloudDrive,
+    LikedSongs,
+    UserPlaylist,
+    LocalMusic,
+    Donation
+}
+
+data class PlaylistComment(
+    val id: String,
+    val authorName: String,
+    val authorAvatarUrl: String,
+    val content: String,
+    val timeLabel: String,
+    val likedCount: Int = 0,
+    val replyCount: Int = 0
+)
+
+data class PlaylistCommentBundle(
+    val comments: List<PlaylistComment>,
+    val totalCount: Int
+)
+
+enum class PlaylistRoute {
+    Overview,
+    Comments
+}
+
+enum class PlaylistCommentSort {
+    Hot,
+    Latest
+}
+
+data class MusicSourceInfo(
+    val id: String,
+    val name: String,
+    val description: String,
+    val badge: String,
+    val accentHex: Long
+)
+
+data class LyricLine(
+    val timeMs: Long,
+    val text: String
+)
+
+enum class PlaybackQuality(
+    val label: String,
+    val description: String,
+    val neteaseLevel: String,
+    val bitrate: Int
+) {
+    Standard("标准", "128 kbps，加载最快", "standard", 128),
+    Higher("较高", "192 kbps，兼顾速度和音质", "higher", 192),
+    ExHigh("极高", "320 kbps，默认推荐", "exhigh", 320),
+    Lossless("无损", "优先请求 lossless，可能需要会员或登录态", "lossless", 999)
+}
