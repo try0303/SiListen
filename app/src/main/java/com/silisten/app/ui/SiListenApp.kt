@@ -3176,7 +3176,10 @@ private fun SiListenNav(
             modifier = Modifier.onSizeChanged(onMeasured)
         ) {
             tabs.forEachIndexed { index, (tab, label) ->
-                KernelSuFloatingBottomBarItem(onClick = { onSelect(tab) }) {
+                KernelSuFloatingBottomBarItem(
+                    index = index,
+                    onClick = { onSelect(tab) }
+                ) {
                     Icon(
                         imageVector = when (tab) {
                             AppTab.Home -> Icons.Rounded.Home

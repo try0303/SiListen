@@ -75,6 +75,7 @@ import kotlin.math.sqrt
 
 val LocalKernelSuFloatingBottomBarTabScale = staticCompositionLocalOf { { 1f } }
 val LocalKernelSuFloatingBottomBarContentTint = staticCompositionLocalOf<Color?> { null }
+private val LocalKernelSuFloatingBottomBarSelect = staticCompositionLocalOf<((Int) -> Unit)?> { null }
 
 private val iosIndicatorSpecular: Highlight = Highlight(
     width = 1.dp,
@@ -139,10 +140,12 @@ private fun rememberGravityRotatedHighlight(
 @Composable
 fun RowScope.KernelSuFloatingBottomBarItem(
     onClick: () -> Unit,
+    index: Int? = null,
     modifier: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit
 ) {
     val scale = LocalKernelSuFloatingBottomBarTabScale.current
+    val selectIndex = LocalKernelSuFloatingBottomBarSelect.current
     Column(
         modifier
             .clip(CircleShape)
@@ -150,7 +153,13 @@ fun RowScope.KernelSuFloatingBottomBarItem(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
                 role = Role.Tab,
-                onClick = onClick
+                onClick = {
+                    if (index != null && selectIndex != null) {
+                        selectIndex(index)
+                    } else {
+                        onClick()
+                    }
+                }
             )
             .fillMaxHeight()
             .weight(1f)
@@ -300,80 +309,93 @@ fun KernelSuFloatingBottomBar(
     val combinedBackdrop = rememberCombinedBackdrop(backdrop, tabsBackdrop)
     val baseHighlight = rememberGravityRotatedHighlight(iosIndicatorSpecular, extraDegrees = -45f)
     val pillHighlight = rememberGravityRotatedHighlight(iosIndicatorSpecular, extraDegrees = 90f)
+    val selectIndex: (Int) -> Unit = { index ->
+        val targetIndex = index.coerceIn(0, tabsCount - 1)
+        externalFollowLockedToIndex = targetIndex
+        if (targetIndex == currentIndex) {
+            dampedDragAnimation.animateToValue(targetIndex.toFloat())
+            onSelected(targetIndex)
+        } else {
+            currentIndex = targetIndex
+        }
+    }
 
     Box(
         modifier = modifier.width(304.dp),
         contentAlignment = Alignment.CenterStart
     ) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .onGloballyPositioned { coords ->
-                    totalWidthPx = coords.size.width.toFloat()
-                    val contentWidthPx = totalWidthPx - with(density) { 8.dp.toPx() }
-                    tabWidthPx = (contentWidthPx / tabsCount).coerceAtLeast(0f)
-                }
-                .graphicsLayer { translationX = panelOffset }
-                .shadow(
-                    elevation = 10.dp,
-                    shape = pillShape,
-                    clip = false,
-                    ambientColor = Color.Black.copy(alpha = if (darkTheme) 0.2f else 0.1f),
-                    spotColor = Color.Black.copy(alpha = if (darkTheme) 0.2f else 0.1f)
-                )
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = {}
-                )
-                .then(
-                    if (isBlurEnabled) {
-                        Modifier.drawBackdrop(
-                            backdrop = backdrop,
-                            shape = { pillShape },
-                            effects = {
-                                vibrancy()
-                                blur(4.dp.toPx(), 4.dp.toPx())
-                                lens(
-                                    refractionHeight = 24.dp.toPx(),
-                                    refractionAmount = 24.dp.toPx()
-                                )
-                            },
-                            highlight = { baseHighlight.copy(alpha = 0.75f) },
-                            layerBlock = {
-                                val width = size.width.coerceAtLeast(1f)
-                                val scale = lerp(1f, 1f + 16.dp.toPx() / width, dampedDragAnimation.pressProgress)
-                                scaleX = scale
-                                scaleY = scale
-                            },
-                            onDrawSurface = { drawRect(surfaceColor) }
-                        )
-                    } else {
-                        Modifier
-                            .clip(pillShape)
-                            .background(if (useLiquidGlassFallback) glassBaseBrush else Brush.linearGradient(listOf(surfaceColor, surfaceColor)), pillShape)
-                            .innerShadow(shape = pillShape) {
-                                InnerShadow(
-                                    radius = if (useLiquidGlassFallback) 9.dp else 0.dp,
-                                    color = Color.White.copy(alpha = if (darkTheme) 0.10f else 0.34f),
-                                    alpha = if (useLiquidGlassFallback) 1f else 0f
-                                )
-                            }
+        CompositionLocalProvider(LocalKernelSuFloatingBottomBarSelect provides selectIndex) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .onGloballyPositioned { coords ->
+                        totalWidthPx = coords.size.width.toFloat()
+                        val contentWidthPx = totalWidthPx - with(density) { 8.dp.toPx() }
+                        tabWidthPx = (contentWidthPx / tabsCount).coerceAtLeast(0f)
                     }
-                )
-                .then(if (isBlurEnabled) interactiveHighlight.modifier else Modifier)
-                .height(64.dp)
-                .padding(4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            content = content
-        )
+                    .graphicsLayer { translationX = panelOffset }
+                    .shadow(
+                        elevation = 10.dp,
+                        shape = pillShape,
+                        clip = false,
+                        ambientColor = Color.Black.copy(alpha = if (darkTheme) 0.2f else 0.1f),
+                        spotColor = Color.Black.copy(alpha = if (darkTheme) 0.2f else 0.1f)
+                    )
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = {}
+                    )
+                    .then(
+                        if (isBlurEnabled) {
+                            Modifier.drawBackdrop(
+                                backdrop = backdrop,
+                                shape = { pillShape },
+                                effects = {
+                                    vibrancy()
+                                    blur(4.dp.toPx(), 4.dp.toPx())
+                                    lens(
+                                        refractionHeight = 24.dp.toPx(),
+                                        refractionAmount = 24.dp.toPx()
+                                    )
+                                },
+                                highlight = { baseHighlight.copy(alpha = 0.75f) },
+                                layerBlock = {
+                                    val width = size.width.coerceAtLeast(1f)
+                                    val scale = lerp(1f, 1f + 16.dp.toPx() / width, dampedDragAnimation.pressProgress)
+                                    scaleX = scale
+                                    scaleY = scale
+                                },
+                                onDrawSurface = { drawRect(surfaceColor) }
+                            )
+                        } else {
+                            Modifier
+                                .clip(pillShape)
+                                .background(if (useLiquidGlassFallback) glassBaseBrush else Brush.linearGradient(listOf(surfaceColor, surfaceColor)), pillShape)
+                                .innerShadow(shape = pillShape) {
+                                    InnerShadow(
+                                        radius = if (useLiquidGlassFallback) 9.dp else 0.dp,
+                                        color = Color.White.copy(alpha = if (darkTheme) 0.10f else 0.34f),
+                                        alpha = if (useLiquidGlassFallback) 1f else 0f
+                                    )
+                                }
+                        }
+                    )
+                    .then(if (isBlurEnabled) interactiveHighlight.modifier else Modifier)
+                    .height(64.dp)
+                    .padding(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                content = content
+            )
+        }
 
         if (isBlurEnabled) {
             CompositionLocalProvider(
                 LocalKernelSuFloatingBottomBarTabScale provides {
                     lerp(1f, 1.2f, dampedDragAnimation.pressProgress)
                 },
-                LocalKernelSuFloatingBottomBarContentTint provides accentColor
+                LocalKernelSuFloatingBottomBarContentTint provides accentColor,
+                LocalKernelSuFloatingBottomBarSelect provides selectIndex
             ) {
                 Row(
                     Modifier
