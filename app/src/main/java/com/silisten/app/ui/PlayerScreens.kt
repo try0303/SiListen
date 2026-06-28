@@ -267,7 +267,7 @@ fun MiniPlayer(
     val song = playback.currentSong
     if (song == null && !alwaysVisible) return
     val accent = MaterialTheme.colorScheme.primary
-    val container = if (darkTheme) Color(0xC91B1C20) else Color.White.copy(alpha = if (glassy) 0.62f else 0.96f)
+    val container = if (darkTheme) Color(0xB8141519) else Color.White.copy(alpha = if (glassy) 0.70f else 0.96f)
     val primaryText = if (darkTheme) Color(0xFFF5F5F6) else Color(0xFF141414)
     val secondaryText = if (darkTheme) Color(0xFFABAFB6) else Color(0xFF666A70)
     val openInteraction = remember { MutableInteractionSource() }
@@ -319,8 +319,8 @@ fun MiniPlayer(
             shape = RoundedCornerShape(26.dp),
             cornerRadius = 26.dp,
             accent = accent,
-            blurRadius = if (glassy) 34.dp else 22.dp,
-            tintAlpha = if (darkTheme) 0.09f else 0.11f,
+            blurRadius = if (glassy) 22.dp else 18.dp,
+            tintAlpha = if (darkTheme) 0.055f else 0.07f,
             modifier = if (glassy) {
                 Modifier
                     .fillMaxWidth()
@@ -344,7 +344,6 @@ fun MiniPlayer(
                             )
                         )
                     )
-                    .blur(if (glassy) 8.dp else 0.dp)
             )
             Row(
                 Modifier
@@ -373,8 +372,8 @@ fun MiniPlayer(
                         )
                     } else {
                         AsyncImage(
-                            model = song?.coverUrl,
-                            contentDescription = song?.title ?: "当前播放",
+                            model = song.coverUrl,
+                            contentDescription = song.title,
                             contentScale = ContentScale.Crop,
                             modifier = Modifier
                                 .fillMaxSize()

@@ -27,7 +27,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -55,8 +54,6 @@ import com.silisten.app.ui.kernelsu.liquid.innerShadow
 import com.silisten.app.ui.kernelsu.liquid.lens
 import com.silisten.app.ui.kernelsu.liquid.rememberCombinedBackdrop
 import com.silisten.app.ui.kernelsu.liquid.vibrancy
-import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.drop
 import top.yukonga.miuix.kmp.blur.Backdrop
 import top.yukonga.miuix.kmp.blur.blur
 import top.yukonga.miuix.kmp.blur.drawBackdrop
@@ -258,6 +255,7 @@ fun KernelSuFloatingBottomBar(
                 externalFollowLockedToIndex = targetIndex
                 currentIndex = targetIndex
                 animateToValue(targetIndex.toFloat())
+                onSelected(targetIndex)
             },
             onDrag = { _, dragAmount ->
                 if (tabWidthPx > 0) {
@@ -287,13 +285,6 @@ fun KernelSuFloatingBottomBar(
             dampedDragAnimation.updateValue(position.fastCoerceIn(0f, (tabsCount - 1).toFloat()))
         }
     }
-    LaunchedEffect(dampedDragAnimation, tabsCount) {
-        snapshotFlow { currentIndex }.drop(1).collectLatest { index ->
-            dampedDragAnimation.animateToValue(index.toFloat())
-            onSelected(index)
-        }
-    }
-
     val interactiveHighlight = remember(animationScope, tabWidthPx, isLtr) {
         InteractiveHighlight(
             animationScope = animationScope,
@@ -312,12 +303,9 @@ fun KernelSuFloatingBottomBar(
     val selectIndex: (Int) -> Unit = { index ->
         val targetIndex = index.coerceIn(0, tabsCount - 1)
         externalFollowLockedToIndex = targetIndex
-        if (targetIndex == currentIndex) {
-            dampedDragAnimation.animateToValue(targetIndex.toFloat())
-            onSelected(targetIndex)
-        } else {
-            currentIndex = targetIndex
-        }
+        currentIndex = targetIndex
+        dampedDragAnimation.animateToValue(targetIndex.toFloat())
+        onSelected(targetIndex)
     }
 
     Box(
