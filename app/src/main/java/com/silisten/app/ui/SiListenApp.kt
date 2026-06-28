@@ -504,10 +504,20 @@ fun SiListenApp(viewModel: SiListenViewModel) {
     }
 
     BackHandler(
-        enabled = uiState.themeSettings.predictiveBackEnabled &&
-            uiState.settingsRoute != SettingsRoute.Main
+        enabled = uiState.settingsRoute != SettingsRoute.Main
     ) {
         viewModel.closeThemeSettings()
+    }
+
+    BackHandler(
+        enabled = uiState.settingsRoute == SettingsRoute.Main &&
+            selectedPlaylist == null &&
+            selectedMainTab != AppTab.Home
+    ) {
+        viewModel.selectTab(AppTab.Home)
+        pagerScope.launch {
+            pagerState.animateScrollToPage(0)
+        }
     }
 
     BackHandler(enabled = selectedPlaylist != null) {
