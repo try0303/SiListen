@@ -252,227 +252,247 @@ import kotlin.math.abs
 import kotlin.math.sign
 import kotlin.math.sqrt
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun SiListenApp(viewModel: SiListenViewModel) {
-    val uiState = viewModel.uiState
-    val selectedPlaylist = uiState.selectedPlaylist
-    val resolvedDark = uiState.themeSettings.resolveDarkTheme()
-    val background = appBackgroundBrush(uiState.themeSettings, resolvedDark)
-    val hasActivePlayback = viewModel.playbackState.currentSong != null
-    val appBackdrop = rememberLayerBackdrop()
-    val miuixSurfaceColor = MaterialTheme.colorScheme.surface
-    val miuixAppBackdrop = rememberMiuixLayerBackdrop {
-        drawRect(miuixSurfaceColor)
-        drawContent()
-    }
+fun SiListenBottomChromeReserve(
+    hasPlaybackChrome: Boolean,
+    hideNavDock: Boolean
+) {
     val appearance = LocalSiListenAppearance.current
-    val mainTabs = remember { listOf(AppTab.Home, AppTab.Search, AppTab.Sources, AppTab.Account) }
-    val selectedMainTab = if (uiState.selectedTab in mainTabs) uiState.selectedTab else AppTab.Account
-    val selectedPage = mainTabs.indexOf(selectedMainTab).coerceAtLeast(0)
-    val pagerState = rememberPagerState(initialPage = selectedPage, pageCount = { mainTabs.size })
-    val pagerScope = rememberCoroutineScope()
-    val pagerPosition by remember {
-        derivedStateOf {
-            (pagerState.currentPage + pagerState.currentPageOffsetFraction)
-                .fastCoerceIn(0f, (mainTabs.size - 1).toFloat())
-        }
-    }
-
-    LaunchedEffect(selectedPage) {
-        if (pagerState.currentPage != selectedPage) {
-            pagerState.animateScrollToPage(selectedPage)
-        }
-    }
-
-    val latestSettingsRoute = androidx.compose.runtime.rememberUpdatedState(uiState.settingsRoute)
-    val latestSelectedTab = androidx.compose.runtime.rememberUpdatedState(uiState.selectedTab)
-
-    LaunchedEffect(pagerState) {
-        snapshotFlow { pagerState.settledPage }.collectLatest { page ->
-            if (latestSettingsRoute.value == SettingsRoute.Main) {
-                val targetTab = mainTabs.getOrNull(page) ?: AppTab.Home
-                if (latestSelectedTab.value != targetTab) {
-                    viewModel.selectTab(targetTab)
-                }
-            }
-        }
-    }
-
-    BackHandler(
-        enabled = uiState.settingsRoute != SettingsRoute.Main
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding(),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        viewModel.closeThemeSettings()
-    }
-
-    BackHandler(
-        enabled = uiState.settingsRoute == SettingsRoute.Main &&
-            selectedPlaylist == null &&
-            selectedMainTab != AppTab.Home
-    ) {
-        viewModel.selectTab(AppTab.Home)
-        pagerScope.launch {
-            pagerState.animateScrollToPage(0)
-        }
-    }
-
-    BackHandler(enabled = selectedPlaylist != null) {
-        if (uiState.selectedPlaylistRoute == PlaylistRoute.Comments) {
-            viewModel.showPlaylistOverview()
-        } else {
-            viewModel.closePlaylist()
-        }
-    }
-
-    Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(background)
-        ) {
-            Box(
+        if (hasPlaybackChrome) {
+            Spacer(
                 modifier = Modifier
-                    .matchParentSize()
-                    .layerBackdrop(appBackdrop)
-            ) {
-                Scaffold(
-                    containerColor = Color.Transparent,
-                    bottomBar = {
-                        SiListenBottomChromeReserve(
-                            hasPlaybackChrome = viewModel.playbackState.currentSong != null ||
-                                viewModel.playbackState.errorMessage != null,
-                            hideNavDock = selectedPlaylist != null
-                        )
-                    }
-                ) { padding ->
-                    Box(modifier = Modifier.fillMaxSize()) {
-                        if (uiState.settingsRoute != SettingsRoute.Main) {
-                            SettingsScreen(uiState, viewModel, padding)
-                        } else {
-                            HorizontalPager(
-                                state = pagerState,
-                                beyondViewportPageCount = 1,
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .then(
-                                        if (appearance.floatingBottomBarEnabled &&
-                                            appearance.blurEnabled &&
-                                            appearance.floatingBottomBarBlurEnabled
-                                        ) {
-                                            Modifier.miuixLayerBackdrop(miuixAppBackdrop)
-                                        } else {
-                                            Modifier
-                                        }
-                                    )
-                            ) { page ->
-                                when (mainTabs[page]) {
-                                    AppTab.Home -> HomeScreen(uiState, viewModel, padding)
-                                    AppTab.Search -> SearchScreen(uiState, viewModel, padding)
-                                    AppTab.Sources -> SourcesScreen(uiState, viewModel, padding)
-                                    AppTab.Account -> AccountScreen(viewModel, padding)
-                                    AppTab.Settings -> AccountScreen(viewModel, padding)
-                                }
-                            }
-                        }
-
-                        if (selectedPlaylist != null) {
-                            PlaylistDetailScreen(
-                                playlist = selectedPlaylist,
-                                route = uiState.selectedPlaylistRoute,
-                                songSearchQuery = uiState.playlistSongSearchQuery,
-                                isLoading = uiState.isPlaylistDetailLoading,
-                                message = uiState.playlistDetailMessage,
-                                commentSort = uiState.playlistCommentSort,
-                                comments = uiState.playlistComments,
-                                commentCount = uiState.playlistCommentCount,
-                                isCommentsLoading = uiState.isPlaylistCommentsLoading,
-                                commentsMessage = uiState.playlistCommentsMessage,
-                                isSubscribed = viewModel.isSelectedPlaylistSubscribed(),
-                                isSubscriptionLoading = uiState.isPlaylistSubscriptionLoading,
-                                dark = resolvedDark,
-                                glassy = appearance.blurEnabled,
-                                onBack = {
-                                    if (uiState.selectedPlaylistRoute == PlaylistRoute.Comments) {
-                                        viewModel.showPlaylistOverview()
-                                    } else {
-                                        viewModel.closePlaylist()
-                                    }
-                                },
-                                onPlayAll = { viewModel.playSelectedPlaylist() },
-                                onSongClick = { song -> viewModel.playSong(song) },
-                                isSongLiked = viewModel::isSongLiked,
-                                isSongLikeLoading = viewModel::isSongLikeLoading,
-                                onToggleSongLike = viewModel::toggleSongLike,
-                                onToggleSubscription = viewModel::toggleSelectedPlaylistSubscription,
-                                onShowSongs = viewModel::showPlaylistOverview,
-                                onShowComments = viewModel::showPlaylistComments,
-                                onRefreshComments = viewModel::refreshPlaylistComments,
-                                onSongSearchQueryChange = viewModel::updatePlaylistSongSearchQuery,
-                                onCommentSortChange = viewModel::selectPlaylistCommentSort,
-                                reserveMiniPlayerSpace = hasActivePlayback
-                            )
-                        }
-                    }
-                }
-
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .zIndex(20f)
-                ) {
-                    SiListenBottomChrome(
-                        viewModel = viewModel,
-                        hideNavDock = selectedPlaylist != null,
-                        backdrop = appBackdrop,
-                        miuixBackdrop = miuixAppBackdrop,
-                        selected = selectedMainTab,
-                        selectedPosition = if (uiState.settingsRoute == SettingsRoute.Main) pagerPosition else null,
-                        onSelect = { tab ->
-                            val index = mainTabs.indexOf(tab)
-                            viewModel.selectTab(tab)
-                            if (index >= 0) {
-                                pagerScope.launch {
-                                    pagerState.animateScrollToPage(index)
-                                }
-                            }
-                        }
-                    )
-                }
-            }
-
-            if (viewModel.isPlayerSheetVisible) {
-                ModalBottomSheet(
-                    onDismissRequest = viewModel::closePlayerSheet,
-                    sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-                    containerColor = Color(0xFF0A0A0A),
-                    scrimColor = Color.Black.copy(alpha = 0.42f),
-                    dragHandle = null
-                ) {
-                    FullPlayer(
-                        playback = viewModel.playbackState,
-                        lyrics = uiState.lyrics,
-                        isLyricLoading = uiState.isLyricLoading,
-                        playerComments = uiState.playerComments,
-                        playerCommentSort = uiState.playerCommentSort,
-                        playerCommentCount = uiState.playerCommentCount,
-                        isPlayerCommentsLoading = uiState.isPlayerCommentsLoading,
-                        playerCommentsMessage = uiState.playerCommentsMessage,
-                        themeSettings = uiState.themeSettings,
-                        lyricDisplayMode = uiState.playbackSettings.lyricDisplayMode,
-                        initialPanel = viewModel.playerSheetPanel,
-                        isLiked = viewModel.playbackState.currentSong?.let(viewModel::isSongLiked) == true,
-                        isLikeLoading = viewModel.playbackState.currentSong?.let(viewModel::isSongLikeLoading) == true,
-                        onToggle = viewModel::togglePlayback,
-                        onNext = viewModel::next,
-                        onPrevious = viewModel::previous,
-                        onPlayQueueIndex = viewModel::playQueueIndex,
-                        onSeek = viewModel::seekTo,
-                        onToggleLike = viewModel::toggleSongLike,
-                        onPlayerCommentSortChange = viewModel::selectPlayerCommentSort,
-                        onRefreshPlayerComments = viewModel::refreshPlayerComments
-                    )
-                }
-            }
-
+                    .fillMaxWidth()
+                    .height(if (appearance.floatingBottomBarEnabled) 92.dp else 84.dp)
+            )
+        }
+        if (!hideNavDock) {
+            Spacer(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(if (appearance.floatingBottomBarEnabled) 88.dp else 72.dp)
+            )
+        } else if (hasPlaybackChrome) {
+            Spacer(modifier = Modifier.height(8.dp))
+        }
     }
 }
 
+@Composable
+fun SiListenBottomChrome(
+    viewModel: SiListenViewModel,
+    hideNavDock: Boolean = false,
+    backdrop: LayerBackdrop? = null,
+    miuixBackdrop: MiuixLayerBackdrop? = null,
+    selected: AppTab = viewModel.uiState.selectedTab,
+    selectedPosition: Float? = null,
+    onSelect: (AppTab) -> Unit = viewModel::selectTab
+) {
+    val uiState = viewModel.uiState
+    val playback = viewModel.playbackState
+    val appearance = LocalSiListenAppearance.current
+    val resolvedDark = appearance.dark
+    val barShape = if (appearance.floatingBottomBarEnabled) RoundedCornerShape(24.dp) else RoundedCornerShape(0.dp)
+    val barAlpha = when {
+        appearance.blurEnabled -> 0.88f
+        else -> 1f
+    }
+    val primaryAccent = appearance.accent
+    val barContainer = MaterialTheme.colorScheme.surfaceContainer
+    val barContent = if (resolvedDark) Color(0xFFF3FFF5) else Color(0xFF121212)
+    var miniPlayerSize by remember { mutableStateOf(IntSize.Zero) }
+    var navSize by remember { mutableStateOf(IntSize.Zero) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        if (playback.currentSong != null || playback.errorMessage != null) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(
+                        start = if (appearance.floatingBottomBarEnabled) 12.dp else 0.dp,
+                        end = if (appearance.floatingBottomBarEnabled) 12.dp else 0.dp,
+                        bottom = if (hideNavDock) 8.dp else 0.dp
+                    ),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                playback.errorMessage?.let { message ->
+                    PlaybackErrorBar(
+                        message = message,
+                        darkTheme = resolvedDark,
+                        glassy = appearance.blurEnabled
+                    )
+                }
+                MiniPlayer(
+                    playback = playback,
+                    onOpenLyrics = { viewModel.openPlayerSheet(PlayerSheetPanel.Lyrics) },
+                    onOpenQueue = { viewModel.openPlayerSheet(PlayerSheetPanel.Queue) },
+                    onToggle = viewModel::togglePlayback,
+                    onNext = viewModel::next,
+                    darkTheme = resolvedDark,
+                    glassy = appearance.blurEnabled,
+                    alwaysVisible = false,
+                    onMeasured = { miniPlayerSize = it }
+                )
+            }
+        } else {
+            Spacer(
+                modifier = Modifier
+                    .onSizeChanged { miniPlayerSize = it }
+            )
+        }
+
+        if (!hideNavDock) {
+            Box(
+                modifier = Modifier
+                    .padding(
+                        horizontal = if (appearance.floatingBottomBarEnabled) 12.dp else 0.dp,
+                        vertical = if (appearance.floatingBottomBarEnabled) 8.dp else 0.dp
+                    )
+            ) {
+                SiListenNav(
+                    selected = selected,
+                    onSelect = onSelect,
+                    darkTheme = resolvedDark,
+                    barShape = barShape,
+                    containerColor = barContainer,
+                    contentColor = barContent,
+                    floating = appearance.floatingBottomBarEnabled,
+                    blurEnabled = appearance.blurEnabled,
+                    floatingBottomBarBlurEnabled = appearance.floatingBottomBarBlurEnabled,
+                    backdrop = miuixBackdrop,
+                    miuixBackdrop = miuixBackdrop,
+                    selectedPosition = selectedPosition,
+                    onMeasured = { navSize = it }
+                )
+            }
+        } else {
+            Spacer(
+                modifier = Modifier
+                    .onSizeChanged { navSize = it }
+            )
+        }
+    }
+}
+
+@Composable
+private fun SiListenNav(
+    selected: AppTab,
+    onSelect: (AppTab) -> Unit,
+    selectedPosition: Float?,
+    darkTheme: Boolean,
+    barShape: Shape,
+    containerColor: Color,
+    contentColor: Color,
+    floating: Boolean,
+    blurEnabled: Boolean,
+    floatingBottomBarBlurEnabled: Boolean,
+    backdrop: MiuixLayerBackdrop?,
+    miuixBackdrop: MiuixLayerBackdrop?,
+    onMeasured: (IntSize) -> Unit
+) {
+    val tabs = listOf(
+        AppTab.Home to "首页",
+        AppTab.Search to "搜索",
+        AppTab.Sources to "音乐库",
+        AppTab.Account to "账号"
+    )
+    val selectedIndex = tabs.indexOfFirst { it.first == selected }.coerceAtLeast(0)
+    val barColor = if (darkTheme) Color.Black.copy(alpha = 0.62f) else Color.White.copy(alpha = 0.72f)
+    if (backdrop != null) {
+        KernelSuFloatingBottomBar(
+            selectedIndex = selectedIndex,
+            selectedPosition = selectedPosition,
+            onSelected = { index -> onSelect(tabs[index].first) },
+            backdrop = backdrop,
+            tabsCount = tabs.size,
+            darkTheme = darkTheme,
+            accentColor = MaterialTheme.colorScheme.primary,
+            containerColor = if (containerColor != Color.Unspecified) containerColor else barColor,
+            isBlurEnabled = floating && blurEnabled && floatingBottomBarBlurEnabled,
+            useLiquidGlassFallback = false,
+            modifier = Modifier.onSizeChanged(onMeasured)
+        ) {
+            tabs.forEachIndexed { index, (tab, label) ->
+                KernelSuFloatingBottomBarItem(
+                    index = index,
+                    onClick = { onSelect(tab) }
+                ) {
+                    Icon(
+                        imageVector = when (tab) {
+                            AppTab.Home -> Icons.Rounded.Home
+                            AppTab.Search -> Icons.Rounded.Search
+                            AppTab.Sources -> Icons.Rounded.LibraryMusic
+                            AppTab.Account -> Icons.Rounded.AccountCircle
+                            AppTab.Settings -> Icons.Rounded.Settings
+                        },
+                        contentDescription = label,
+                        tint = if (index == selectedIndex) contentColor else contentColor.copy(alpha = 0.68f)
+                    )
+                    Text(
+                        text = label,
+                        color = if (index == selectedIndex) contentColor else contentColor.copy(alpha = 0.68f),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = if (index == selectedIndex) FontWeight.Black else FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Clip
+                    )
+                }
+            }
+        }
+    } else {
+        Surface(
+            color = if (containerColor != Color.Unspecified) containerColor else barColor,
+            shape = barShape,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(72.dp)
+                .onSizeChanged(onMeasured)
+        ) {
+            Row(
+                Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                tabs.forEachIndexed { index, (tab, label) ->
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .noRippleClick(shape = CircleShape) { onSelect(tab) },
+                        verticalArrangement = Arrangement.Center,
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Icon(
+                            imageVector = when (tab) {
+                                AppTab.Home -> Icons.Rounded.Home
+                                AppTab.Search -> Icons.Rounded.Search
+                                AppTab.Sources -> Icons.Rounded.LibraryMusic
+                                AppTab.Account -> Icons.Rounded.AccountCircle
+                                AppTab.Settings -> Icons.Rounded.Settings
+                            },
+                            contentDescription = label,
+                            tint = if (index == selectedIndex) contentColor else contentColor.copy(alpha = 0.64f)
+                        )
+                        Text(
+                            text = label,
+                            color = if (index == selectedIndex) contentColor else contentColor.copy(alpha = 0.64f),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = if (index == selectedIndex) FontWeight.Black else FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Clip
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
