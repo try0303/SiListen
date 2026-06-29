@@ -83,6 +83,7 @@ class PlayerController(context: Context) {
         .build()
     private val notificationController = PlaybackNotificationController(appContext)
     private var playSession = 0
+    private var notificationDismissedByUser = false
 
     var state by mutableStateOf(PlaybackState())
         private set
@@ -147,6 +148,7 @@ class PlayerController(context: Context) {
             bufferedMs = 0L,
             errorMessage = null
         )
+        notificationDismissedByUser = false
 
         val firstPlayable = orderedSongs.firstNotNullOfOrNull { song -> song.toPlayable(registry) }
             ?: run {
@@ -205,12 +207,18 @@ class PlayerController(context: Context) {
     }
 
     fun toggle() {
-        if (player.isPlaying) player.pause() else player.play()
+        if (player.isPlaying) {
+            player.pause()
+        } else {
+            notificationDismissedByUser = false
+            player.play()
+        }
         state = state.copy(isPlaying = player.isPlaying)
         syncNotification()
     }
 
     fun next() {
+        notificationDismissedByUser = false
         if (player.hasNextMediaItem()) {
             player.seekToNextMediaItem()
         }
@@ -218,6 +226,7 @@ class PlayerController(context: Context) {
     }
 
     fun previous() {
+        notificationDismissedByUser = false
         if (player.hasPreviousMediaItem()) player.seekToPreviousMediaItem() else player.seekTo(0L)
         updateProgress()
     }
@@ -225,6 +234,7 @@ class PlayerController(context: Context) {
     fun playAt(index: Int) {
         val targetIndex = index.coerceIn(0, state.queue.lastIndex)
         if (state.queue.isEmpty()) return
+        notificationDismissedByUser = false
         player.seekTo(targetIndex, 0L)
         player.play()
         state = state.copy(
@@ -254,6 +264,14 @@ class PlayerController(context: Context) {
     }
 
     fun dismissNotification() {
+        notificationDismissedByUser = true
+        if (player.isPlaying) {
+            player.pause()
+        }
+        state = state.copy(
+            isPlaying = false,
+            isPreparing = false
+        )
         notificationController.cancel()
     }
 
@@ -267,7 +285,12 @@ class PlayerController(context: Context) {
     private fun syncNotification() {
         if (state.currentSong == null) {
             notificationController.cancel()
+        } else if (notificationDismissedByUser && !state.isPlaying) {
+            notificationController.cancel()
         } else {
+            if (state.isPlaying) {
+                notificationDismissedByUser = false
+            }
             notificationController.show(state, mediaSession)
         }
     }

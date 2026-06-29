@@ -72,6 +72,13 @@ internal class PlaybackNotificationController(
                     actionIntent(ACTION_NEXT)
                 )
             )
+            .addAction(
+                NotificationCompat.Action(
+                    android.R.drawable.ic_menu_close_clear_cancel,
+                    "关闭",
+                    actionIntent(ACTION_DISMISS)
+                )
+            )
             .setStyle(
                 MediaStyleNotificationHelper.MediaStyle(mediaSession)
                     .setShowActionsInCompactView(0, 1, 2)
@@ -88,7 +95,7 @@ internal class PlaybackNotificationController(
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "SiListen Playback",
+            "音乐播放",
             NotificationManager.IMPORTANCE_LOW
         ).apply {
             description = "显示 SiListen 的音乐播放控制通知"
