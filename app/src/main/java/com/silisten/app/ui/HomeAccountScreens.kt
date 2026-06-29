@@ -1,6 +1,7 @@
 ﻿package com.silisten.app.ui
 
 import android.Manifest
+import android.content.ActivityNotFoundException
 import android.content.ContentValues
 import android.content.Intent
 import android.graphics.Bitmap
@@ -979,7 +980,7 @@ private fun AccountLoginHero(
                     )
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        text = "流程参考 bujuan，但视觉上收成更正常的原生登录界面。",
+                        text = "推荐先用短信验证码；如果二维码被网易云限制，可以直接切换登录方式。",
                         color = secondaryText,
                         style = MaterialTheme.typography.bodyMedium
                     )
@@ -1428,7 +1429,7 @@ private fun QrLoginCard(
                 onClick = onOpenNeteaseApp
             )
             Text(
-                text = "网易云没有公开稳定的第三方授权回调；这里会打开官方 App，登录态仍通过二维码或短信接口确认。",
+                text = "打开官方 App 后，请回到 SiListen 使用二维码或短信验证码完成登录。",
                 color = mutedText.copy(alpha = 0.82f),
                 style = MaterialTheme.typography.bodySmall
             )
@@ -1506,12 +1507,23 @@ private fun openNeteaseCloudMusic(context: android.content.Context) {
     val packageName = "com.netease.cloudmusic"
     val launchIntent = context.packageManager.getLaunchIntentForPackage(packageName)
     if (launchIntent == null) {
-        Toast.makeText(context, "未检测到网易云音乐 App，请先安装后再扫码", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "未检测到网易云音乐 App，请先安装或更新后再试", Toast.LENGTH_SHORT).show()
         return
     }
-    context.startActivity(
-        launchIntent
-            .setPackage(packageName)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    )
+    runCatching {
+        context.startActivity(
+            launchIntent
+                .setPackage(packageName)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    }.onSuccess {
+        Toast.makeText(context, "已打开网易云音乐，请回到 SiListen 完成登录", Toast.LENGTH_SHORT).show()
+    }.onFailure { error ->
+        val message = if (error is ActivityNotFoundException) {
+            "无法打开网易云音乐 App，请确认已安装官方最新版"
+        } else {
+            "打开网易云音乐失败，请手动打开 App 后再回来登录"
+        }
+        Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+    }
 }

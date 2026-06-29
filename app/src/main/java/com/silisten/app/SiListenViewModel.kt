@@ -555,7 +555,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
                 loginState = accountState.loginState.copy(
                     message = result.fold(
                         onSuccess = { it.message },
-                        onFailure = { "验证码发送失败：${it.message.orEmpty()}" }
+                        onFailure = { neteaseFailureMessage("验证码发送失败", it) }
                     )
                 )
             )
@@ -580,7 +580,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
             val state = runCatching {
                 accountRepository.loginNeteaseBySms(phone, captcha)
             }.getOrElse {
-                NeteaseLoginState(false, null, "登录失败：${it.message.orEmpty()}")
+                NeteaseLoginState(false, null, neteaseFailureMessage("登录失败", it))
             }
             accountState = accountState.copy(loggingIn = false, loginState = state)
             if (state.loggedIn) {
@@ -627,7 +627,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
             )
             val qr = runCatching { accountRepository.createNeteaseQrLogin() }.getOrElse {
                 accountState = accountState.copy(
-                    qrLogin = QrLoginUiState(message = "二维码生成失败：${it.message.orEmpty()}")
+                    qrLogin = QrLoginUiState(message = neteaseFailureMessage("二维码生成失败", it))
                 )
                 return@launch
             }
@@ -654,7 +654,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
                     accountState = accountState.copy(
                         qrLogin = accountState.qrLogin.copy(
                             polling = false,
-                            message = "二维码检查失败：${it.message.orEmpty()}"
+                            message = neteaseFailureMessage("二维码检查失败", it)
                         )
                     )
                     return@launch
@@ -688,6 +688,25 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    private fun neteaseFailureMessage(prefix: String, throwable: Throwable): String {
+        val raw = throwable.message.orEmpty().trim()
+        val hint = when {
+            raw.isBlank() -> "请检查网络后重试，或者切换到另一种登录方式。"
+            raw.contains("请切换其他登录方式") || raw.contains("升级新版本") ->
+                "网易云暂时不接受当前扫码方式，请更新网易云音乐 App 后重试，或改用短信验证码登录。"
+            raw.contains("风控") || raw.contains("安全") || raw.contains("risk", ignoreCase = true) ->
+                "网易云触发了安全验证，请稍后重试，或改用短信验证码登录。"
+            raw.contains("timeout", ignoreCase = true) || raw.contains("超时") ->
+                "网络响应超时，请稍后重试。"
+            raw.contains("502") || raw.contains("503") || raw.contains("HTTP", ignoreCase = true) ->
+                "网易云服务暂时不可用，请稍后重试，或切换到短信验证码登录。"
+            raw.contains("连接失败") || raw.contains("不可用") ->
+                "当前网络无法连接网易云服务，请换个网络后重试。"
+            else -> raw.take(80)
+        }
+        return "$prefix：$hint"
+    }
+
     fun runSearch() {
         val query = uiState.searchQuery.trim()
         searchJob?.cancel()
@@ -706,7 +725,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         val results = runCatching {
             musicRepository.search(sourceId, query)
         }.getOrElse {
-            uiState = uiState.copy(message = "搜索接口暂时不可用，已显示本地推荐")
+            uiState = uiState.copy(message = "搜索暂时不可用，已先显示本地推荐")
             emptyList()
         }
         if (sourceId == uiState.selectedSourceId && query == uiState.searchQuery.trim()) {

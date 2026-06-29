@@ -135,12 +135,14 @@ import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.geometry.Offset
@@ -165,13 +167,10 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.composed
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
@@ -248,6 +247,7 @@ import top.yukonga.miuix.kmp.blur.LayerBackdrop as MiuixLayerBackdrop
 import top.yukonga.miuix.kmp.blur.layerBackdrop as miuixLayerBackdrop
 import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop as rememberMiuixLayerBackdrop
 import kotlin.math.abs
+import kotlin.math.floor
 import kotlin.math.sign
 import kotlin.math.sqrt
 
@@ -1888,38 +1888,88 @@ private fun AppleMusicLyricLineText(
     }
     val fontWeight = if (active) FontWeight.Black else FontWeight.Bold
     val maxLines = if (active) activeMaxLines else inactiveMaxLines
-    val displayText = if (active) {
-        val splitIndex = (text.length * progress.coerceIn(0f, 1f))
-            .toInt()
-            .coerceIn(0, text.length)
-        buildAnnotatedString {
-            if (splitIndex > 0) {
-                withStyle(SpanStyle(color = activeTextColor)) {
-                    append(text.substring(0, splitIndex))
-                }
-            }
-            if (splitIndex < text.length) {
-                withStyle(SpanStyle(color = unsungTextColor)) {
-                    append(text.substring(splitIndex))
-                }
-            }
-        }
-    } else {
-        buildAnnotatedString {
-            withStyle(SpanStyle(color = inactiveTextColor)) {
-                append(text)
-            }
-        }
+    if (!active) {
+        Text(
+            text = text,
+            color = inactiveTextColor,
+            style = baseStyle,
+            fontWeight = fontWeight,
+            textAlign = textAlign,
+            maxLines = maxLines,
+            overflow = TextOverflow.Ellipsis,
+            modifier = modifier.fillMaxWidth()
+        )
+        return
     }
-    Text(
-        text = displayText,
-        style = baseStyle,
-        fontWeight = fontWeight,
-        textAlign = textAlign,
-        maxLines = maxLines,
-        overflow = TextOverflow.Ellipsis,
-        modifier = modifier.fillMaxWidth()
-    )
+
+    var textLayout by remember(text, maxLines, textAlign, baseStyle) { mutableStateOf<TextLayoutResult?>(null) }
+    Box(modifier = modifier.fillMaxWidth()) {
+        Text(
+            text = text,
+            color = unsungTextColor,
+            style = baseStyle,
+            fontWeight = fontWeight,
+            textAlign = textAlign,
+            maxLines = maxLines,
+            overflow = TextOverflow.Ellipsis,
+            onTextLayout = { textLayout = it },
+            modifier = Modifier.fillMaxWidth()
+        )
+        Text(
+            text = text,
+            color = activeTextColor,
+            style = baseStyle,
+            fontWeight = fontWeight,
+            textAlign = textAlign,
+            maxLines = maxLines,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .fillMaxWidth()
+                .drawWithContent {
+                    val layout = textLayout ?: return@drawWithContent
+                    val p = progress.coerceIn(0f, 1f)
+                    if (p <= 0f || layout.lineCount == 0) return@drawWithContent
+                    val visibleEnd = (0 until layout.lineCount)
+                        .maxOf { line -> layout.getLineEnd(line, visibleEnd = true) }
+                        .coerceIn(0, text.length)
+                    if (visibleEnd <= 0) return@drawWithContent
+
+                    val fillOffset = visibleEnd * p
+                    val fillBaseOffset = floor(fillOffset).toInt().coerceIn(0, visibleEnd)
+                    val fillFraction = (fillOffset - fillBaseOffset).coerceIn(0f, 1f)
+
+                    for (line in 0 until layout.lineCount) {
+                        val lineStart = layout.getLineStart(line).coerceIn(0, visibleEnd)
+                        val lineEnd = layout.getLineEnd(line, visibleEnd = true).coerceIn(lineStart, visibleEnd)
+                        if (lineEnd <= lineStart) continue
+
+                        val lineLeft = layout.getLineLeft(line).coerceIn(0f, size.width)
+                        val lineRight = layout.getLineRight(line).coerceIn(lineLeft, size.width)
+                        val right = when {
+                            fillOffset >= lineEnd -> lineRight
+                            fillOffset <= lineStart -> lineLeft
+                            else -> {
+                                val startOffset = fillBaseOffset.coerceIn(lineStart, lineEnd)
+                                val endOffset = (startOffset + 1).coerceAtMost(lineEnd)
+                                val startX = layout.getHorizontalPosition(startOffset, true)
+                                val endX = layout.getHorizontalPosition(endOffset, true)
+                                lerp(startX, endX, fillFraction).coerceIn(lineLeft, lineRight)
+                            }
+                        }
+                        if (right > lineLeft) {
+                            clipRect(
+                                left = lineLeft,
+                                top = layout.getLineTop(line).coerceAtLeast(0f),
+                                right = right,
+                                bottom = layout.getLineBottom(line).coerceAtMost(size.height)
+                            ) {
+                                this@drawWithContent.drawContent()
+                            }
+                        }
+                    }
+                }
+        )
+    }
 }
 
 @Composable

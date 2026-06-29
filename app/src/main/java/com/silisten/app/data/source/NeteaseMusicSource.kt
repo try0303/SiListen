@@ -25,7 +25,7 @@ class NeteaseMusicSource(
     override val info = MusicSourceInfo(
         id = "netease",
         name = "网易云音乐",
-        description = "默认音源。端内直连网易云优先，本地 api-enhanced 服务仅作为兜底。",
+        description = "默认音源。优先直接连接网易云音乐，网络不稳定时会自动尝试备用方式。",
         badge = "默认",
         accentHex = 0xFF1ED760
     )
@@ -72,7 +72,7 @@ class NeteaseMusicSource(
         MusicPlaylist(
             id = "netease-daily-discovery",
             title = "每日发现",
-            subtitle = if (songs.isEmpty()) "登录后可获取网易云每日推荐" else "来自端内网易云直连 /recommend/songs",
+            subtitle = if (songs.isEmpty()) "登录后可获取网易云每日推荐" else "根据你的网易云听歌偏好推荐",
             coverUrl = songs.firstOrNull()?.coverUrl ?: defaultCover,
             songs = songs,
             kind = PlaylistKind.DailyDiscovery
