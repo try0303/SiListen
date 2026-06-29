@@ -1902,7 +1902,7 @@ private fun AppleMusicLyricLineText(
         return
     }
 
-    var textLayout by remember(text, maxLines, textAlign, baseStyle) { mutableStateOf<TextLayoutResult?>(null) }
+    var textLayout by remember(text, maxLines, textAlign) { mutableStateOf<TextLayoutResult?>(null) }
     Box(modifier = modifier.fillMaxWidth()) {
         Text(
             text = text,
