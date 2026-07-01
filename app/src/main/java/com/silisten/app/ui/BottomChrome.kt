@@ -20,7 +20,6 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandHorizontally
@@ -57,7 +56,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
@@ -123,6 +121,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -291,7 +290,10 @@ fun SiListenBottomChrome(
     miuixBackdrop: MiuixLayerBackdrop? = null,
     selected: AppTab = viewModel.uiState.selectedTab,
     selectedPosition: Float? = null,
-    onSelect: (AppTab) -> Unit = viewModel::selectTab
+    onSelect: (AppTab) -> Unit = viewModel::selectTab,
+    searchExpanded: Boolean = false,
+    onSearchExpand: () -> Unit = { viewModel.selectTab(AppTab.Search) },
+    onSearchSubmit: () -> Unit = { viewModel.selectTab(AppTab.Search) }
 ) {
     val uiState = viewModel.uiState
     val playback = viewModel.playbackState
@@ -352,28 +354,73 @@ fun SiListenBottomChrome(
         }
 
         if (!hideNavDock) {
-            Box(
+            BoxWithConstraints(
                 modifier = Modifier
+                    .fillMaxWidth()
                     .padding(
                         horizontal = if (appearance.floatingBottomBarEnabled) 12.dp else 0.dp,
                         vertical = if (appearance.floatingBottomBarEnabled) 8.dp else 0.dp
                     )
             ) {
-                SiListenNav(
-                    selected = selected,
-                    onSelect = onSelect,
-                    darkTheme = resolvedDark,
-                    barShape = barShape,
-                    containerColor = barContainer,
-                    contentColor = barContent,
-                    floating = appearance.floatingBottomBarEnabled,
-                    blurEnabled = appearance.blurEnabled,
-                    floatingBottomBarBlurEnabled = appearance.floatingBottomBarBlurEnabled,
-                    backdrop = miuixBackdrop,
-                    miuixBackdrop = miuixBackdrop,
-                    selectedPosition = selectedPosition,
-                    onMeasured = { navSize = it }
+                val buttonSize = if (appearance.floatingBottomBarEnabled) 58.dp else 64.dp
+                val gap = if (appearance.floatingBottomBarEnabled) 10.dp else 0.dp
+                val collapsedNavWidth = if (appearance.floatingBottomBarEnabled) 112.dp else 104.dp
+                val expandedSearchWidth = (maxWidth - collapsedNavWidth - gap).coerceAtLeast(buttonSize)
+                val searchProgress by animateFloatAsState(
+                    targetValue = if (searchExpanded) 1f else 0f,
+                    animationSpec = spring(dampingRatio = 0.72f, stiffness = 300f),
+                    label = "search-dock-stretch"
                 )
+                val stretchProgress = searchProgress.fastCoerceIn(0f, 1f)
+                val searchWidth = buttonSize + (expandedSearchWidth - buttonSize) * stretchProgress
+                val navWidth = (maxWidth - gap - searchWidth).coerceAtLeast(collapsedNavWidth)
+                val navCollapsed = searchExpanded || stretchProgress > 0.12f
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(gap)
+                ) {
+                    Box(modifier = Modifier.width(navWidth)) {
+                        SiListenNav(
+                            selected = selected,
+                            onSelect = onSelect,
+                            collapsedToSelected = navCollapsed,
+                            darkTheme = resolvedDark,
+                            barShape = barShape,
+                            containerColor = barContainer,
+                            contentColor = barContent,
+                            floating = appearance.floatingBottomBarEnabled,
+                            blurEnabled = appearance.blurEnabled,
+                            floatingBottomBarBlurEnabled = appearance.floatingBottomBarBlurEnabled,
+                            backdrop = miuixBackdrop,
+                            miuixBackdrop = miuixBackdrop,
+                            selectedPosition = if (navCollapsed) 0f else selectedPosition,
+                            onMeasured = { navSize = it }
+                        )
+                        if (navCollapsed) {
+                            Box(
+                                modifier = Modifier
+                                    .matchParentSize()
+                                    .zIndex(2f)
+                                    .noRippleClick(shape = CircleShape) {
+                                        onSelect(selected)
+                                    }
+                            )
+                        }
+                    }
+                    SearchDockButton(
+                        width = searchWidth,
+                        progress = stretchProgress,
+                        darkTheme = resolvedDark,
+                        floating = appearance.floatingBottomBarEnabled,
+                        blurEnabled = appearance.blurEnabled,
+                        expanded = searchExpanded,
+                        contentColor = barContent,
+                        containerColor = barContainer,
+                        onExpand = onSearchExpand,
+                        onSubmit = onSearchSubmit
+                    )
+                }
             }
         } else {
             Spacer(
@@ -385,10 +432,105 @@ fun SiListenBottomChrome(
 }
 
 @Composable
+private fun SearchDockButton(
+    width: Dp,
+    progress: Float,
+    darkTheme: Boolean,
+    floating: Boolean,
+    blurEnabled: Boolean,
+    expanded: Boolean,
+    contentColor: Color,
+    containerColor: Color,
+    onExpand: () -> Unit,
+    onSubmit: () -> Unit
+) {
+    val shape = RoundedCornerShape(999.dp)
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val pressScaleX by animateFloatAsState(
+        targetValue = if (pressed) 0.95f else 1f,
+        animationSpec = spring(dampingRatio = 0.62f, stiffness = 520f),
+        label = "search-dock-press-x"
+    )
+    val pressScaleY by animateFloatAsState(
+        targetValue = if (pressed) 0.94f else 1f,
+        animationSpec = spring(dampingRatio = 0.62f, stiffness = 520f),
+        label = "search-dock-press-y"
+    )
+    val stretchScaleX by animateFloatAsState(
+        targetValue = if (expanded) 1.018f else 1f,
+        animationSpec = spring(dampingRatio = 0.55f, stiffness = 240f),
+        label = "search-dock-rubber-x"
+    )
+    val fallbackColor = if (darkTheme) {
+        Color.Black.copy(alpha = if (blurEnabled) 0.62f else 0.88f)
+    } else {
+        Color.White.copy(alpha = if (blurEnabled) 0.76f else 0.96f)
+    }
+    val buttonHeight = if (floating) 58.dp else 64.dp
+    val collapsedIconInset = (buttonHeight - 24.dp) / 2f
+    val iconInset = collapsedIconInset + (18.dp - collapsedIconInset) * progress
+    val textProgress = ((progress - 0.26f) / 0.74f).fastCoerceIn(0f, 1f)
+    Surface(
+        color = if (containerColor != Color.Unspecified) {
+            containerColor.copy(alpha = if (blurEnabled) 0.72f + 0.10f * progress else 1f)
+        } else {
+            fallbackColor
+        },
+        shape = shape,
+        border = BorderStroke(1.dp, if (darkTheme) Color.White.copy(alpha = 0.10f) else Color.Black.copy(alpha = 0.06f)),
+        modifier = Modifier
+            .width(width)
+            .height(buttonHeight)
+            .graphicsLayer {
+                scaleX = pressScaleX * stretchScaleX
+                scaleY = pressScaleY
+            }
+            .clip(shape)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null
+            ) {
+                if (expanded) onSubmit() else onExpand()
+            }
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(start = iconInset, end = 18.dp * progress),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Start
+        ) {
+            Icon(
+                Icons.Rounded.Search,
+                contentDescription = "搜索",
+                tint = contentColor,
+                modifier = Modifier.size(24.dp)
+            )
+            if (expanded || textProgress > 0.01f) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Spacer(Modifier.width(10.dp * textProgress))
+                    Text(
+                        text = "搜索歌曲、歌手或专辑",
+                        color = contentColor.copy(alpha = 0.74f),
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.alpha(textProgress)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun SiListenNav(
     selected: AppTab,
     onSelect: (AppTab) -> Unit,
     selectedPosition: Float?,
+    collapsedToSelected: Boolean,
     darkTheme: Boolean,
     barShape: Shape,
     containerColor: Color,
@@ -400,19 +542,31 @@ private fun SiListenNav(
     miuixBackdrop: MiuixLayerBackdrop?,
     onMeasured: (IntSize) -> Unit
 ) {
-    val tabs = listOf(
+    val allTabs = listOf(
         AppTab.Home to "首页",
-        AppTab.Search to "搜索",
         AppTab.Sources to "音乐库",
         AppTab.Account to "账号"
     )
+    val collapsedTab = allTabs.firstOrNull { it.first == selected } ?: allTabs.first()
+    val tabs = if (collapsedToSelected) {
+        listOf(collapsedTab)
+    } else {
+        allTabs
+    }
     val selectedIndex = tabs.indexOfFirst { it.first == selected }.coerceAtLeast(0)
     val barColor = if (darkTheme) Color.Black.copy(alpha = 0.62f) else Color.White.copy(alpha = 0.72f)
     if (backdrop != null) {
         KernelSuFloatingBottomBar(
             selectedIndex = selectedIndex,
             selectedPosition = selectedPosition,
-            onSelected = { index -> onSelect(tabs[index].first) },
+            onSelected = { index ->
+                val targetTab = if (collapsedToSelected) {
+                    collapsedTab.first
+                } else {
+                    tabs.getOrNull(index)?.first ?: collapsedTab.first
+                }
+                onSelect(targetTab)
+            },
             backdrop = backdrop,
             tabsCount = tabs.size,
             darkTheme = darkTheme,
@@ -423,29 +577,34 @@ private fun SiListenNav(
             modifier = Modifier.onSizeChanged(onMeasured)
         ) {
             tabs.forEachIndexed { index, (tab, label) ->
-                KernelSuFloatingBottomBarItem(
-                    index = index,
-                    onClick = { onSelect(tab) }
-                ) {
-                    Icon(
-                        imageVector = when (tab) {
-                            AppTab.Home -> Icons.Rounded.Home
-                            AppTab.Search -> Icons.Rounded.Search
-                            AppTab.Sources -> Icons.Rounded.LibraryMusic
-                            AppTab.Account -> Icons.Rounded.AccountCircle
-                            AppTab.Settings -> Icons.Rounded.Settings
-                        },
-                        contentDescription = label,
-                        tint = if (index == selectedIndex) contentColor else contentColor.copy(alpha = 0.68f)
-                    )
-                    Text(
-                        text = label,
-                        color = if (index == selectedIndex) contentColor else contentColor.copy(alpha = 0.68f),
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = if (index == selectedIndex) FontWeight.Black else FontWeight.Medium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Clip
-                    )
+                key(collapsedToSelected, tab) {
+                    KernelSuFloatingBottomBarItem(
+                        index = if (collapsedToSelected) null else index,
+                        onClick = {
+                            val targetTab = if (collapsedToSelected) collapsedTab.first else tab
+                            onSelect(targetTab)
+                        }
+                    ) {
+                        Icon(
+                            imageVector = when (tab) {
+                                AppTab.Home -> Icons.Rounded.Home
+                                AppTab.Search -> Icons.Rounded.Search
+                                AppTab.Sources -> Icons.Rounded.LibraryMusic
+                                AppTab.Account -> Icons.Rounded.AccountCircle
+                                AppTab.Settings -> Icons.Rounded.Settings
+                            },
+                            contentDescription = label,
+                            tint = if (index == selectedIndex) contentColor else contentColor.copy(alpha = 0.68f)
+                        )
+                        Text(
+                            text = label,
+                            color = if (index == selectedIndex) contentColor else contentColor.copy(alpha = 0.68f),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = if (index == selectedIndex) FontWeight.Black else FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Clip
+                        )
+                    }
                 }
             }
         }
@@ -463,33 +622,38 @@ private fun SiListenNav(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 tabs.forEachIndexed { index, (tab, label) ->
-                    Column(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxHeight()
-                            .noRippleClick(shape = CircleShape) { onSelect(tab) },
-                        verticalArrangement = Arrangement.Center,
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Icon(
-                            imageVector = when (tab) {
-                                AppTab.Home -> Icons.Rounded.Home
-                                AppTab.Search -> Icons.Rounded.Search
-                                AppTab.Sources -> Icons.Rounded.LibraryMusic
-                                AppTab.Account -> Icons.Rounded.AccountCircle
-                                AppTab.Settings -> Icons.Rounded.Settings
-                            },
-                            contentDescription = label,
-                            tint = if (index == selectedIndex) contentColor else contentColor.copy(alpha = 0.64f)
-                        )
-                        Text(
-                            text = label,
-                            color = if (index == selectedIndex) contentColor else contentColor.copy(alpha = 0.64f),
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = if (index == selectedIndex) FontWeight.Black else FontWeight.Medium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Clip
-                        )
+                    key(collapsedToSelected, tab) {
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                                .noRippleClick(shape = CircleShape) {
+                                    val targetTab = if (collapsedToSelected) collapsedTab.first else tab
+                                    onSelect(targetTab)
+                                },
+                            verticalArrangement = Arrangement.Center,
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(
+                                imageVector = when (tab) {
+                                    AppTab.Home -> Icons.Rounded.Home
+                                    AppTab.Search -> Icons.Rounded.Search
+                                    AppTab.Sources -> Icons.Rounded.LibraryMusic
+                                    AppTab.Account -> Icons.Rounded.AccountCircle
+                                    AppTab.Settings -> Icons.Rounded.Settings
+                                },
+                                contentDescription = label,
+                                tint = if (index == selectedIndex) contentColor else contentColor.copy(alpha = 0.64f)
+                            )
+                            Text(
+                                text = label,
+                                color = if (index == selectedIndex) contentColor else contentColor.copy(alpha = 0.64f),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = if (index == selectedIndex) FontWeight.Black else FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Clip
+                            )
+                        }
                     }
                 }
             }

@@ -284,7 +284,8 @@ fun SettingsScreen(
             themeSettings = uiState.themeSettings,
             onBack = viewModel::closeThemeSettings,
             onQualityChange = viewModel::selectPlaybackQuality,
-            onLyricDisplayModeChange = viewModel::selectLyricDisplayMode
+            onLyricDisplayModeChange = viewModel::selectLyricDisplayMode,
+            onStatusBarLyricChange = viewModel::setStatusBarLyricEnabled
         )
         SettingsRoute.Source -> SourceSettingsScreen(
             uiState = uiState,
@@ -825,7 +826,8 @@ private fun PlaybackSettingsScreen(
     themeSettings: ThemeSettingsState,
     onBack: () -> Unit,
     onQualityChange: (PlaybackQuality) -> Unit,
-    onLyricDisplayModeChange: (LyricDisplayMode) -> Unit
+    onLyricDisplayModeChange: (LyricDisplayMode) -> Unit,
+    onStatusBarLyricChange: (Boolean) -> Unit
 ) {
     val dark = themeSettings.resolveDarkTheme()
     val pageColor = if (dark) Color(0xFF050805) else Color(0xFFF6F6F8)
@@ -866,6 +868,20 @@ private fun PlaybackSettingsScreen(
                     textColor = titleColor,
                     mutedColor = mutedColor,
                     dark = dark
+                )
+            }
+        }
+        item {
+            ThemeSettingsGroup(containerColor = panelColor) {
+                ThemeToggleRow(
+                    title = "状态栏歌词",
+                    subtitle = "开启后，音乐通知副标题会显示当前歌词；关闭后显示歌手名。",
+                    mark = "词",
+                    checked = playbackSettings.statusBarLyricEnabled,
+                    onCheckedChange = onStatusBarLyricChange,
+                    containerColor = panelColor,
+                    textColor = titleColor,
+                    mutedColor = mutedColor
                 )
             }
         }

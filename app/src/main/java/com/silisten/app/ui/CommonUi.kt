@@ -92,6 +92,7 @@ import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.LibraryMusic
+import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.Podcasts
@@ -816,7 +817,8 @@ fun SongRow(
     liked: Boolean,
     likeLoading: Boolean,
     onClick: () -> Unit,
-    onLikeClick: (() -> Unit)? = null
+    onLikeClick: (() -> Unit)? = null,
+    onMoreClick: (() -> Unit)? = null
 ) {
     val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val titleColor = if (dark) Color(0xFFF5FFF6) else Color(0xFF111111)
@@ -895,7 +897,163 @@ fun SongRow(
             }
             Spacer(Modifier.width(4.dp))
         }
-        Icon(Icons.Rounded.MusicNote, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+        if (onMoreClick != null) {
+            IconButton(
+                onClick = onMoreClick,
+                modifier = Modifier.size(42.dp)
+            ) {
+                Icon(
+                    Icons.Rounded.MoreVert,
+                    contentDescription = "更多",
+                    tint = mutedText,
+                    modifier = Modifier.size(26.dp)
+                )
+            }
+        } else {
+            Icon(Icons.Rounded.MusicNote, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SongActionSheetModal(
+    song: Song,
+    dark: Boolean,
+    onDismiss: () -> Unit,
+    onPlayNext: () -> Unit,
+    onAddToPlaylist: () -> Unit,
+    onShowComments: () -> Unit
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = if (dark) Color(0xFF111111) else Color(0xFFF7F7F8),
+        scrimColor = Color.Black.copy(alpha = 0.36f),
+        dragHandle = null
+    ) {
+        SongActionSheet(
+            song = song,
+            dark = dark,
+            onPlayNext = onPlayNext,
+            onAddToPlaylist = onAddToPlaylist,
+            onShowComments = onShowComments
+        )
+    }
+}
+
+@Composable
+fun SongActionSheet(
+    song: Song,
+    dark: Boolean,
+    onPlayNext: () -> Unit,
+    onAddToPlaylist: () -> Unit,
+    onShowComments: () -> Unit
+) {
+    val titleColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
+    val mutedText = if (dark) Color.White.copy(alpha = 0.56f) else Color(0xFF676A70)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(horizontal = 18.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            AsyncImage(
+                model = song.coverUrl,
+                contentDescription = song.title,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .size(58.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color(0xFF252525))
+            )
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = song.title,
+                    color = titleColor,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Black,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    text = song.artist,
+                    color = mutedText,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+        SongActionRow(
+            icon = Icons.AutoMirrored.Rounded.QueueMusic,
+            title = "下一首播放",
+            dark = dark,
+            onClick = onPlayNext
+        )
+        SongActionRow(
+            icon = Icons.Rounded.LibraryMusic,
+            title = "加入歌单",
+            dark = dark,
+            onClick = onAddToPlaylist
+        )
+        SongActionRow(
+            icon = Icons.AutoMirrored.Rounded.Comment,
+            title = "查看歌曲评论",
+            dark = dark,
+            onClick = onShowComments
+        )
+    }
+}
+
+@Composable
+private fun SongActionRow(
+    icon: ImageVector,
+    title: String,
+    dark: Boolean,
+    onClick: () -> Unit
+) {
+    val titleColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
+    val iconBackground = if (dark) Color.White.copy(alpha = 0.08f) else Color.White.copy(alpha = 0.82f)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(22.dp))
+            .background(if (dark) Color.White.copy(alpha = 0.06f) else Color.White.copy(alpha = 0.76f))
+            .noRippleClick(shape = RoundedCornerShape(22.dp), onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(38.dp)
+                .clip(CircleShape)
+                .background(iconBackground),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = titleColor,
+                modifier = Modifier.size(21.dp)
+            )
+        }
+        Spacer(Modifier.width(14.dp))
+        Text(
+            text = title,
+            color = titleColor,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold
+        )
     }
 }
 

@@ -17,7 +17,12 @@ data class MusicPlaylist(
     val subtitle: String,
     val coverUrl: String,
     val songs: List<Song>,
-    val kind: PlaylistKind = PlaylistKind.Playlist
+    val kind: PlaylistKind = PlaylistKind.Playlist,
+    val description: String = "",
+    val albumCount: Int = 0,
+    val songCount: Int = 0,
+    val mvCount: Int = 0,
+    val albums: List<MusicPlaylist> = emptyList()
 )
 
 enum class PlaylistKind {
@@ -28,6 +33,8 @@ enum class PlaylistKind {
     CloudDrive,
     LikedSongs,
     UserPlaylist,
+    Album,
+    Artist,
     LocalMusic,
     Donation
 }
@@ -65,9 +72,18 @@ data class MusicSourceInfo(
     val accentHex: Long
 )
 
+data class LyricWord(
+    val offsetMs: Long,
+    val durationMs: Long,
+    val text: String
+)
+
 data class LyricLine(
     val timeMs: Long,
-    val text: String
+    val text: String,
+    val translation: String? = null,
+    val romanization: String? = null,
+    val words: List<LyricWord>? = null
 )
 
 enum class PlaybackQuality(

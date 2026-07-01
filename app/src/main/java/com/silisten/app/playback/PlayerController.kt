@@ -3,7 +3,13 @@ package com.silisten.app.playback
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.media.MediaMetadata as PlatformMediaMetadata
+import android.media.session.MediaSession as PlatformMediaSession
+import android.media.session.PlaybackState as PlatformPlaybackState
 import android.net.Uri
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -16,8 +22,8 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
-import androidx.media3.session.MediaSession
 import com.silisten.app.PlayerSheetPanel
+import com.silisten.app.R
 import com.silisten.app.data.model.Song
 import com.silisten.app.data.source.MusicSourceRegistry
 import kotlinx.coroutines.async
@@ -67,23 +73,53 @@ class PlayerController(context: Context) {
                 .build()
         )
         .build()
-    private val mediaSession = MediaSession.Builder(appContext, player)
-        .setSessionActivity(
-            PendingIntent.getActivity(
-                appContext,
-                2001,
-                Intent(appContext, com.silisten.app.MainActivity::class.java).apply {
-                    flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                    putExtra("open_player", true)
-                    putExtra("player_panel", PlayerSheetPanel.Lyrics.name)
-                },
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
+    private val systemMediaSession = PlatformMediaSession(appContext, "SiListen").apply {
+        setSessionActivity(playerContentIntent())
+        setCallback(
+            object : PlatformMediaSession.Callback() {
+                override fun onPlay() {
+                    notificationDismissedByUser = false
+                    player.play()
+                    state = state.copy(isPlaying = player.isPlaying)
+                    syncNotification()
+                }
+
+                override fun onPause() {
+                    player.pause()
+                    state = state.copy(isPlaying = false, isPreparing = false)
+                    syncNotification()
+                }
+
+                override fun onStop() {
+                    dismissNotification()
+                }
+
+                override fun onSkipToPrevious() {
+                    previous()
+                }
+
+                override fun onSkipToNext() {
+                    next()
+                }
+
+                override fun onSeekTo(pos: Long) {
+                    seekTo(pos)
+                }
+
+                override fun onCustomAction(action: String, extras: Bundle?) {
+                    if (action == PlaybackNotificationController.ACTION_LIKE) {
+                        PlaybackNotificationBridge.like()
+                    }
+                }
+            },
+            Handler(Looper.getMainLooper())
         )
-        .build()
+    }
     private val notificationController = PlaybackNotificationController(appContext)
     private var playSession = 0
     private var notificationDismissedByUser = false
+    private var notificationLyricEnabled = false
+    private var notificationLyricText: String? = null
 
     var state by mutableStateOf(PlaybackState())
         private set
@@ -206,6 +242,23 @@ class PlayerController(context: Context) {
             .build()
     }
 
+    suspend fun queueNext(song: Song, registry: MusicSourceRegistry): Boolean {
+        if (state.currentSong == null || player.mediaItemCount == 0) {
+            playQueue(listOf(song), 0, registry)
+            return state.currentSong?.id == song.id
+        }
+        val playable = song.toPlayable(registry) ?: return false
+        val insertIndex = (player.currentMediaItemIndex + 1)
+            .coerceIn(0, state.queue.size)
+        val nextQueue = state.queue.toMutableList().apply {
+            add(insertIndex, playable.first)
+        }
+        state = state.copy(queue = nextQueue, errorMessage = null)
+        player.addMediaItem(insertIndex, playable.second)
+        syncNotification()
+        return true
+    }
+
     fun toggle() {
         if (player.isPlaying) {
             player.pause()
@@ -272,26 +325,124 @@ class PlayerController(context: Context) {
             isPlaying = false,
             isPreparing = false
         )
+        updateSystemMediaSession(isLiked = false)
         notificationController.cancel()
+        PlaybackService.stop()
+    }
+
+    fun setNotificationLyric(enabled: Boolean, lyricText: String?) {
+        val normalizedText = lyricText?.trim()?.takeIf { it.isNotBlank() }
+        if (notificationLyricEnabled == enabled && notificationLyricText == normalizedText) return
+        notificationLyricEnabled = enabled
+        notificationLyricText = normalizedText
+        syncNotification()
     }
 
     fun release() {
         PlaybackNotificationBridge.detach(this)
         notificationController.cancel()
-        mediaSession.release()
+        PlaybackService.stop()
+        systemMediaSession.release()
         player.release()
     }
 
     private fun syncNotification() {
         if (state.currentSong == null) {
+            updateSystemMediaSession(isLiked = false)
             notificationController.cancel()
+            PlaybackService.stop()
         } else if (notificationDismissedByUser && !state.isPlaying) {
+            updateSystemMediaSession(isLiked = false)
             notificationController.cancel()
+            PlaybackService.stop()
         } else {
             if (state.isPlaying) {
                 notificationDismissedByUser = false
             }
-            notificationController.show(state, mediaSession)
+            val isLiked = state.currentSong?.let(PlaybackNotificationBridge::isLiked) == true
+            updateSystemMediaSession(isLiked)
+            val notification = notificationController.show(
+                playbackState = state,
+                mediaSessionToken = systemMediaSession.sessionToken,
+                isCurrentSongLiked = isLiked,
+                contentTextOverride = if (notificationLyricEnabled) notificationLyricText else null
+            )
+            if (notification != null) {
+                PlaybackService.update(
+                    context = appContext,
+                    notification = notification,
+                    foreground = state.isPlaying || state.isPreparing
+                )
+            }
         }
     }
+
+    private fun updateSystemMediaSession(isLiked: Boolean) {
+        val song = state.currentSong
+        if (song == null) {
+            systemMediaSession.setPlaybackState(
+                PlatformPlaybackState.Builder()
+                    .setState(PlatformPlaybackState.STATE_NONE, 0L, 1f)
+                    .build()
+            )
+            systemMediaSession.isActive = false
+            return
+        }
+
+        systemMediaSession.isActive = true
+        systemMediaSession.setMetadata(
+            PlatformMediaMetadata.Builder()
+                .putString(PlatformMediaMetadata.METADATA_KEY_TITLE, song.title)
+                .putString(PlatformMediaMetadata.METADATA_KEY_ARTIST, song.artist)
+                .putString(PlatformMediaMetadata.METADATA_KEY_ALBUM, song.album)
+                .putLong(
+                    PlatformMediaMetadata.METADATA_KEY_DURATION,
+                    state.durationMs.takeIf { it > 0L } ?: song.durationMs
+                )
+                .build()
+        )
+
+        val platformState = when {
+            state.isPreparing -> PlatformPlaybackState.STATE_BUFFERING
+            state.isPlaying -> PlatformPlaybackState.STATE_PLAYING
+            else -> PlatformPlaybackState.STATE_PAUSED
+        }
+        val actions = PlatformPlaybackState.ACTION_PLAY or
+            PlatformPlaybackState.ACTION_PAUSE or
+            PlatformPlaybackState.ACTION_PLAY_PAUSE or
+            PlatformPlaybackState.ACTION_SKIP_TO_PREVIOUS or
+            PlatformPlaybackState.ACTION_SKIP_TO_NEXT or
+            PlatformPlaybackState.ACTION_SEEK_TO or
+            PlatformPlaybackState.ACTION_STOP
+
+        systemMediaSession.setPlaybackState(
+            PlatformPlaybackState.Builder()
+                .setState(platformState, state.positionMs.coerceAtLeast(0L), if (state.isPlaying) 1f else 0f)
+                .setBufferedPosition(state.bufferedMs.coerceAtLeast(0L))
+                .setActions(actions)
+                .addCustomAction(
+                    PlatformPlaybackState.CustomAction.Builder(
+                        PlaybackNotificationController.ACTION_LIKE,
+                        if (isLiked) "取消喜欢" else "喜欢",
+                        if (isLiked) R.drawable.ic_favorite_24 else R.drawable.ic_favorite_border_24
+                    ).build()
+                )
+                .build()
+        )
+    }
+
+    private fun playerContentIntent(): PendingIntent {
+        val intent = Intent(appContext, com.silisten.app.MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra("open_player", true)
+            putExtra("player_panel", PlayerSheetPanel.Lyrics.name)
+        }
+        return PendingIntent.getActivity(
+            appContext,
+            2001,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+    }
+
 }

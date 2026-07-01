@@ -24,17 +24,24 @@ import com.silisten.app.data.model.PlaylistRoute
 import com.silisten.app.data.model.Song
 import com.silisten.app.data.repository.AccountRepository
 import com.silisten.app.data.repository.MusicRepository
+import com.silisten.app.data.repository.RecentPlaybackStore
 import com.silisten.app.data.source.MusicSourceRegistry
 import com.silisten.app.data.source.NeteaseApiClient
 import com.silisten.app.data.source.NeteaseLoginState
 import com.silisten.app.playback.PlaybackState
-import com.silisten.app.playback.PlayerController
+import com.silisten.app.playback.PlaybackCenter
+import com.silisten.app.playback.PlaybackNotificationBridge
 import kotlinx.coroutines.async
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 enum class AppTab { Home, Search, Sources, Account, Settings }
+
+enum class SearchResultKind { Songs, Playlists, Albums, Artists }
+
+enum class ArtistPageTab { Detail, Hot, Songs, Albums }
 
 enum class SettingsRoute { Main, Theme, Playback, Source, Donation }
 
@@ -68,7 +75,16 @@ data class ThemeSettingsState(
 
 data class PlaybackSettingsState(
     val quality: PlaybackQuality = PlaybackQuality.ExHigh,
-    val lyricDisplayMode: LyricDisplayMode = LyricDisplayMode.Glass
+    val lyricDisplayMode: LyricDisplayMode = LyricDisplayMode.Glass,
+    val statusBarLyricEnabled: Boolean = false
+)
+
+data class ArtistSongsPageState(
+    val artistId: String = "",
+    val songs: List<Song> = emptyList(),
+    val hasMore: Boolean = false,
+    val isLoading: Boolean = false,
+    val message: String? = null
 )
 
 data class SiListenUiState(
@@ -85,12 +101,16 @@ data class SiListenUiState(
     val cloudDrive: MusicPlaylist? = null,
     val likedSongs: MusicPlaylist? = null,
     val userPlaylists: List<MusicPlaylist> = emptyList(),
+    val recentPlayedSongs: List<Song> = emptyList(),
     val localSongs: List<Song> = emptyList(),
     val localMusicMessage: String = "点击扫描本地音乐",
     val isLibraryLoading: Boolean = false,
     val selectedPlaylist: MusicPlaylist? = null,
+    val playlistBackStack: List<MusicPlaylist> = emptyList(),
     val selectedPlaylistRoute: PlaylistRoute = PlaylistRoute.Overview,
     val playlistSongSearchQuery: String = "",
+    val selectedArtistTab: ArtistPageTab = ArtistPageTab.Detail,
+    val artistSongsPage: ArtistSongsPageState = ArtistSongsPageState(),
     val isPlaylistDetailLoading: Boolean = false,
     val playlistDetailMessage: String? = null,
     val playlistCommentSort: PlaylistCommentSort = PlaylistCommentSort.Hot,
@@ -105,15 +125,39 @@ data class SiListenUiState(
     val playerCommentsMessage: String? = null,
     val likedSongIds: Set<String> = emptySet(),
     val songLikeLoadingIds: Set<String> = emptySet(),
+    val likePrompt: LikePromptState? = null,
+    val playlistChooserSong: Song? = null,
+    val playlistAddLoadingIds: Set<String> = emptySet(),
     val subscribedPlaylistIds: Set<String> = emptySet(),
     val isPlaylistSubscriptionLoading: Boolean = false,
     val searchQuery: String = "",
     val searchResults: List<Song> = emptyList(),
+    val searchPlaylists: List<MusicPlaylist> = emptyList(),
+    val searchAlbums: List<MusicPlaylist> = emptyList(),
+    val searchArtists: List<MusicPlaylist> = emptyList(),
+    val searchHasMoreSongs: Boolean = false,
+    val searchHasMorePlaylists: Boolean = false,
+    val searchHasMoreAlbums: Boolean = false,
+    val searchHasMoreArtists: Boolean = false,
+    val isLoadingMoreSearch: Boolean = false,
     val isLoading: Boolean = true,
     val isSearching: Boolean = false,
     val lyrics: List<LyricLine> = emptyList(),
     val isLyricLoading: Boolean = false,
     val message: String? = null
+)
+
+data class LikePromptState(
+    val song: Song,
+    val message: String = "已添加到我喜欢的音乐",
+    val showAddToPlaylistAction: Boolean = true
+)
+
+private data class SearchInitialResults(
+    val songs: List<Song>,
+    val playlists: List<MusicPlaylist>,
+    val albums: List<MusicPlaylist>,
+    val artists: List<MusicPlaylist>
 )
 
 data class AccountUiState(
@@ -140,6 +184,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
     private val accountRepository = AccountRepository(neteaseApiClient)
     private val themePreferences = application.getSharedPreferences("theme_settings", Context.MODE_PRIVATE)
     private val playbackPreferences = application.getSharedPreferences("playback_settings", Context.MODE_PRIVATE)
+    private val recentPlaybackStore = RecentPlaybackStore(application)
     private val themePreferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == null || key in themePreferenceKeys) {
             val next = loadThemeSettings()
@@ -152,13 +197,14 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         MusicSourceRegistry.create(neteaseApiClient) { currentPlaybackQuality() }
     )
     val registry: MusicSourceRegistry = musicRepository.registry
-    private val player = PlayerController(application)
+    private val player = PlaybackCenter.controller(application)
 
     var uiState by mutableStateOf(
         SiListenUiState(
             selectedSourceId = registry.default().info.id,
             themeSettings = loadThemeSettings(),
-            playbackSettings = loadPlaybackSettings()
+            playbackSettings = loadPlaybackSettings(),
+            recentPlayedSongs = recentPlaybackStore.load()
         )
     )
         private set
@@ -169,7 +215,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
     var isPlayerSheetVisible by mutableStateOf(false)
         private set
 
-    var playerSheetPanel by mutableStateOf(PlayerSheetPanel.Lyrics)
+    var playerSheetPanel by mutableStateOf(PlayerSheetPanel.Detail)
         private set
 
     private var qrLoginJob: Job? = null
@@ -178,15 +224,22 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
     private var lyricJob: Job? = null
     private var libraryJob: Job? = null
     private var playerCommentsJob: Job? = null
+    private var artistSongsJob: Job? = null
     private var loadedLyricSongId: String? = null
     private var loadedPlayerCommentSongId: String? = null
+    private var lastRecentSongId: String? = null
     private var lastLibraryRefreshAt = 0L
+    private val artistTabMemory = mutableMapOf<String, ArtistPageTab>()
+    private val notificationLikeHandler = { toggleCurrentSongLike() }
+    private val notificationLikeStateProvider: (Song) -> Boolean = { song -> isSongLiked(song) }
 
     val playbackState: PlaybackState
         get() = player.state
 
     init {
         themePreferences.registerOnSharedPreferenceChangeListener(themePreferenceListener)
+        PlaybackNotificationBridge.attachLikeHandler(notificationLikeHandler)
+        PlaybackNotificationBridge.attachLikeStateProvider(notificationLikeStateProvider)
         viewModelScope.launch {
             loadFeatured()
         }
@@ -198,7 +251,9 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
             delay(200)
             while (true) {
                 player.updateProgress()
+                syncRecentPlayback()
                 syncLyricsWithPlayback()
+                syncStatusBarLyricWithPlayback()
                 delay(100)
             }
         }
@@ -298,22 +353,60 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         savePlaybackSettings(next)
     }
 
+    fun setStatusBarLyricEnabled(enabled: Boolean) {
+        val next = uiState.playbackSettings.copy(statusBarLyricEnabled = enabled)
+        uiState = uiState.copy(playbackSettings = next)
+        savePlaybackSettings(next)
+        syncStatusBarLyricWithPlayback()
+    }
+
     fun selectSource(sourceId: String) {
         searchJob?.cancel()
         uiState = uiState.copy(
             selectedSourceId = sourceId,
             searchQuery = "",
-            searchResults = emptyList()
+            searchResults = emptyList(),
+            searchPlaylists = emptyList(),
+            searchAlbums = emptyList(),
+            searchArtists = emptyList(),
+            searchHasMoreSongs = false,
+            searchHasMorePlaylists = false,
+            searchHasMoreAlbums = false,
+            searchHasMoreArtists = false,
+            isLoadingMoreSearch = false
         )
         loadFeatured()
     }
 
     fun openPlaylist(playlist: MusicPlaylist) {
+        val isArtist = playlist.kind == PlaylistKind.Artist || playlist.id.startsWith("netease-artist-")
+        val needsDetail = playlist.songs.isEmpty() &&
+            (playlist.id.startsWith("netease-playlist-") ||
+                playlist.id.startsWith("netease-album-") ||
+                playlist.id.startsWith("netease-artist-"))
+        val nextBackStack = uiState.selectedPlaylist
+            ?.takeIf { it.id != playlist.id }
+            ?.let { uiState.playlistBackStack + it }
+            ?: uiState.playlistBackStack
+        val nextArtistTab = if (isArtist) {
+            artistTabMemory[playlist.id] ?: ArtistPageTab.Detail
+        } else {
+            uiState.selectedArtistTab
+        }
+        val nextArtistSongsPage = if (isArtist && uiState.artistSongsPage.artistId != playlist.id) {
+            artistSongsJob?.cancel()
+            ArtistSongsPageState(artistId = playlist.id, hasMore = true)
+        } else {
+            uiState.artistSongsPage
+        }
         uiState = uiState.copy(
             selectedPlaylist = playlist,
+            playlistBackStack = nextBackStack,
             selectedPlaylistRoute = PlaylistRoute.Overview,
             playlistSongSearchQuery = "",
-            isPlaylistDetailLoading = playlist.songs.isEmpty() && playlist.id.startsWith("netease-playlist-"),
+            selectedArtistTab = nextArtistTab,
+            artistSongsPage = nextArtistSongsPage,
+            isPlaylistDetailLoading = needsDetail,
             playlistDetailMessage = null,
             playlistCommentSort = PlaylistCommentSort.Hot,
             playlistComments = emptyList(),
@@ -321,33 +414,60 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
             isPlaylistCommentsLoading = false,
             playlistCommentsMessage = null
         )
-        if (playlist.songs.isNotEmpty() || !playlist.id.startsWith("netease-playlist-")) {
+        if (!needsDetail) {
             return
         }
         viewModelScope.launch {
             val detail = runCatching { musicRepository.neteasePlaylistDetail(playlist) }.getOrElse {
                 uiState = uiState.copy(
                     isPlaylistDetailLoading = false,
-                    playlistDetailMessage = "歌单详情加载失败：${it.message.orEmpty()}"
+                    playlistDetailMessage = "内容详情加载失败：${it.message.orEmpty()}"
                 )
                 return@launch
             }
+            if (uiState.selectedPlaylist?.id != playlist.id) return@launch
             uiState = uiState.copy(
                 selectedPlaylist = detail,
                 recommendedPlaylists = uiState.recommendedPlaylists.replacePlaylist(detail),
                 userPlaylists = uiState.userPlaylists.replacePlaylist(detail),
                 featured = uiState.featured.replacePlaylist(detail),
                 isPlaylistDetailLoading = false,
-                playlistDetailMessage = if (detail.songs.isEmpty()) "这个歌单暂时没有可播放歌曲" else null
+                playlistDetailMessage = if (detail.songs.isEmpty()) "这里暂时没有可播放歌曲" else null
             )
         }
     }
 
     fun closePlaylist() {
+        val previousPlaylist = uiState.playlistBackStack.lastOrNull()
+        if (previousPlaylist != null) {
+            val previousArtistTab = if (previousPlaylist.kind == PlaylistKind.Artist) {
+                artistTabMemory[previousPlaylist.id] ?: uiState.selectedArtistTab
+            } else {
+                uiState.selectedArtistTab
+            }
+            uiState = uiState.copy(
+                selectedPlaylist = previousPlaylist,
+                playlistBackStack = uiState.playlistBackStack.dropLast(1),
+                selectedPlaylistRoute = PlaylistRoute.Overview,
+                playlistSongSearchQuery = "",
+                selectedArtistTab = previousArtistTab,
+                isPlaylistDetailLoading = false,
+                playlistDetailMessage = null,
+                playlistCommentSort = PlaylistCommentSort.Hot,
+                playlistComments = emptyList(),
+                playlistCommentCount = 0,
+                isPlaylistCommentsLoading = false,
+                playlistCommentsMessage = null,
+                isPlaylistSubscriptionLoading = false
+            )
+            return
+        }
         uiState = uiState.copy(
             selectedPlaylist = null,
+            playlistBackStack = emptyList(),
             selectedPlaylistRoute = PlaylistRoute.Overview,
             playlistSongSearchQuery = "",
+            selectedArtistTab = ArtistPageTab.Detail,
             isPlaylistDetailLoading = false,
             playlistDetailMessage = null,
             playlistCommentSort = PlaylistCommentSort.Hot,
@@ -361,6 +481,83 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
 
     fun playSelectedPlaylist(startIndex: Int = 0) {
         uiState.selectedPlaylist?.let { playPlaylist(it, startIndex) }
+    }
+
+    fun playSelectedArtistTab(startIndex: Int = 0) {
+        val playlist = uiState.selectedPlaylist ?: return
+        val page = uiState.artistSongsPage
+        if (
+            playlist.kind == PlaylistKind.Artist &&
+            uiState.selectedArtistTab == ArtistPageTab.Songs &&
+            page.artistId == playlist.id &&
+            page.songs.isNotEmpty()
+        ) {
+            viewModelScope.launch {
+                player.playQueue(page.songs, startIndex.coerceIn(0, page.songs.lastIndex), registry)
+            }
+            return
+        }
+        playPlaylist(playlist, startIndex)
+    }
+
+    fun selectArtistTab(tab: ArtistPageTab) {
+        val artist = uiState.selectedPlaylist?.takeIf { it.kind == PlaylistKind.Artist } ?: return
+        artistTabMemory[artist.id] = tab
+        uiState = uiState.copy(selectedArtistTab = tab)
+        if (tab == ArtistPageTab.Songs) {
+            loadMoreArtistSongs(initial = true)
+        }
+    }
+
+    fun loadMoreArtistSongs(initial: Boolean = false) {
+        val artist = uiState.selectedPlaylist?.takeIf { it.kind == PlaylistKind.Artist } ?: return
+        val currentPage = uiState.artistSongsPage
+        val sameArtist = currentPage.artistId == artist.id
+        if (currentPage.isLoading) return
+        if (sameArtist && !initial && !currentPage.hasMore) return
+        if (sameArtist && initial && currentPage.songs.isNotEmpty()) return
+
+        val existingSongs = if (sameArtist && !initial) currentPage.songs else emptyList()
+        val offset = existingSongs.size
+        val requestArtistId = artist.id
+        artistSongsJob?.cancel()
+        artistSongsJob = viewModelScope.launch {
+            uiState = uiState.copy(
+                artistSongsPage = ArtistSongsPageState(
+                    artistId = requestArtistId,
+                    songs = existingSongs,
+                    hasMore = true,
+                    isLoading = true
+                )
+            )
+            val nextSongs = runCatching {
+                musicRepository.neteaseArtistSongs(artist, ARTIST_SONG_PAGE_SIZE, offset)
+            }.getOrElse {
+                if (uiState.selectedPlaylist?.id == requestArtistId) {
+                    uiState = uiState.copy(
+                        artistSongsPage = ArtistSongsPageState(
+                            artistId = requestArtistId,
+                            songs = existingSongs,
+                            hasMore = existingSongs.isNotEmpty(),
+                            isLoading = false,
+                            message = "单曲加载失败：${it.message.orEmpty()}"
+                        )
+                    )
+                }
+                return@launch
+            }
+            if (uiState.selectedPlaylist?.id != requestArtistId) return@launch
+            val combined = (existingSongs + nextSongs).distinctBy { it.id }
+            uiState = uiState.copy(
+                artistSongsPage = ArtistSongsPageState(
+                    artistId = requestArtistId,
+                    songs = combined,
+                    hasMore = nextSongs.size >= ARTIST_SONG_PAGE_SIZE,
+                    isLoading = false,
+                    message = if (combined.isEmpty()) "暂时没有获取到更多单曲" else null
+                )
+            )
+        }
     }
 
     fun isSelectedPlaylistSubscribed(): Boolean {
@@ -510,7 +707,19 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         searchJob?.cancel()
         val cleanQuery = query.trim()
         if (cleanQuery.isBlank()) {
-            uiState = uiState.copy(searchResults = emptyList(), isSearching = false, message = null)
+            uiState = uiState.copy(
+                searchResults = emptyList(),
+                searchPlaylists = emptyList(),
+                searchAlbums = emptyList(),
+                searchArtists = emptyList(),
+                searchHasMoreSongs = false,
+                searchHasMorePlaylists = false,
+                searchHasMoreAlbums = false,
+                searchHasMoreArtists = false,
+                isLoadingMoreSearch = false,
+                isSearching = false,
+                message = null
+            )
             return
         }
         searchJob = viewModelScope.launch {
@@ -717,19 +926,173 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
 
     private suspend fun performSearch(query: String) {
         if (query.isBlank()) {
-            uiState = uiState.copy(searchResults = emptyList(), isSearching = false, message = null)
+            uiState = uiState.copy(
+                searchResults = emptyList(),
+                searchPlaylists = emptyList(),
+                searchAlbums = emptyList(),
+                searchArtists = emptyList(),
+                searchHasMoreSongs = false,
+                searchHasMorePlaylists = false,
+                searchHasMoreAlbums = false,
+                searchHasMoreArtists = false,
+                isLoadingMoreSearch = false,
+                isSearching = false,
+                message = null
+            )
             return
         }
-        uiState = uiState.copy(isSearching = true, message = null)
+        uiState = uiState.copy(
+            isSearching = true,
+            isLoadingMoreSearch = false,
+            searchResults = emptyList(),
+            searchPlaylists = emptyList(),
+            searchAlbums = emptyList(),
+            searchArtists = emptyList(),
+            searchHasMoreSongs = false,
+            searchHasMorePlaylists = false,
+            searchHasMoreAlbums = false,
+            searchHasMoreArtists = false,
+            message = null
+        )
         val sourceId = uiState.selectedSourceId
-        val results = runCatching {
-            musicRepository.search(sourceId, query)
-        }.getOrElse {
-            uiState = uiState.copy(message = "搜索暂时不可用，已先显示本地推荐")
-            emptyList()
+        val results = coroutineScope {
+            val songs = async {
+                runCatching {
+                    musicRepository.searchSongs(sourceId, query, SEARCH_SONG_PAGE_SIZE, 0)
+                }.getOrDefault(emptyList())
+            }
+            val playlists = async {
+                runCatching {
+                    musicRepository.searchPlaylists(sourceId, query, SEARCH_COLLECTION_PAGE_SIZE, 0)
+                }.getOrDefault(emptyList())
+            }
+            val albums = async {
+                runCatching {
+                    musicRepository.searchAlbums(sourceId, query, SEARCH_COLLECTION_PAGE_SIZE, 0)
+                }.getOrDefault(emptyList())
+            }
+            val artists = async {
+                runCatching {
+                    musicRepository.searchArtists(sourceId, query, SEARCH_COLLECTION_PAGE_SIZE, 0)
+                }.getOrDefault(emptyList())
+            }
+            SearchInitialResults(
+                songs = songs.await(),
+                playlists = playlists.await(),
+                albums = albums.await(),
+                artists = artists.await()
+            )
         }
         if (sourceId == uiState.selectedSourceId && query == uiState.searchQuery.trim()) {
-            uiState = uiState.copy(searchResults = results, isSearching = false)
+            uiState = uiState.copy(
+                searchResults = results.songs,
+                searchPlaylists = results.playlists,
+                searchAlbums = results.albums,
+                searchArtists = results.artists,
+                searchHasMoreSongs = results.songs.size >= SEARCH_SONG_PAGE_SIZE,
+                searchHasMorePlaylists = results.playlists.size >= SEARCH_COLLECTION_PAGE_SIZE,
+                searchHasMoreAlbums = results.albums.size >= SEARCH_COLLECTION_PAGE_SIZE,
+                searchHasMoreArtists = results.artists.size >= SEARCH_COLLECTION_PAGE_SIZE,
+                isSearching = false,
+                message = if (
+                    results.songs.isEmpty() &&
+                    results.playlists.isEmpty() &&
+                    results.albums.isEmpty() &&
+                    results.artists.isEmpty()
+                ) {
+                    "没有找到相关内容"
+                } else {
+                    null
+                }
+            )
+        }
+    }
+
+    fun loadMoreSearchResults(kind: SearchResultKind) {
+        val query = uiState.searchQuery.trim()
+        if (query.isBlank() || uiState.isSearching || uiState.isLoadingMoreSearch) return
+        val hasMore = when (kind) {
+            SearchResultKind.Songs -> uiState.searchHasMoreSongs
+            SearchResultKind.Playlists -> uiState.searchHasMorePlaylists
+            SearchResultKind.Albums -> uiState.searchHasMoreAlbums
+            SearchResultKind.Artists -> uiState.searchHasMoreArtists
+        }
+        if (!hasMore) return
+        val sourceId = uiState.selectedSourceId
+        val offset = when (kind) {
+            SearchResultKind.Songs -> uiState.searchResults.size
+            SearchResultKind.Playlists -> uiState.searchPlaylists.size
+            SearchResultKind.Albums -> uiState.searchAlbums.size
+            SearchResultKind.Artists -> uiState.searchArtists.size
+        }
+        viewModelScope.launch {
+            uiState = uiState.copy(isLoadingMoreSearch = true, message = null)
+            val nextSongs: List<Song>
+            val nextPlaylists: List<MusicPlaylist>
+            when (kind) {
+                SearchResultKind.Songs -> {
+                    nextSongs = runCatching {
+                        musicRepository.searchSongs(sourceId, query, SEARCH_SONG_PAGE_SIZE, offset)
+                    }.getOrDefault(emptyList())
+                    nextPlaylists = emptyList()
+                }
+                SearchResultKind.Playlists -> {
+                    nextSongs = emptyList()
+                    nextPlaylists = runCatching {
+                        musicRepository.searchPlaylists(sourceId, query, SEARCH_COLLECTION_PAGE_SIZE, offset)
+                    }.getOrDefault(emptyList())
+                }
+                SearchResultKind.Albums -> {
+                    nextSongs = emptyList()
+                    nextPlaylists = runCatching {
+                        musicRepository.searchAlbums(sourceId, query, SEARCH_COLLECTION_PAGE_SIZE, offset)
+                    }.getOrDefault(emptyList())
+                }
+                SearchResultKind.Artists -> {
+                    nextSongs = emptyList()
+                    nextPlaylists = runCatching {
+                        musicRepository.searchArtists(sourceId, query, SEARCH_COLLECTION_PAGE_SIZE, offset)
+                    }.getOrDefault(emptyList())
+                }
+            }
+            if (sourceId != uiState.selectedSourceId || query != uiState.searchQuery.trim()) {
+                uiState = uiState.copy(isLoadingMoreSearch = false)
+                return@launch
+            }
+            uiState = when (kind) {
+                SearchResultKind.Songs -> {
+                    val combined = (uiState.searchResults + nextSongs).distinctBy { it.id }
+                    uiState.copy(
+                        searchResults = combined,
+                        searchHasMoreSongs = nextSongs.size >= SEARCH_SONG_PAGE_SIZE,
+                        isLoadingMoreSearch = false
+                    )
+                }
+                SearchResultKind.Playlists -> {
+                    val combined = (uiState.searchPlaylists + nextPlaylists).distinctBy { it.id }
+                    uiState.copy(
+                        searchPlaylists = combined,
+                        searchHasMorePlaylists = nextPlaylists.size >= SEARCH_COLLECTION_PAGE_SIZE,
+                        isLoadingMoreSearch = false
+                    )
+                }
+                SearchResultKind.Albums -> {
+                    val combined = (uiState.searchAlbums + nextPlaylists).distinctBy { it.id }
+                    uiState.copy(
+                        searchAlbums = combined,
+                        searchHasMoreAlbums = nextPlaylists.size >= SEARCH_COLLECTION_PAGE_SIZE,
+                        isLoadingMoreSearch = false
+                    )
+                }
+                SearchResultKind.Artists -> {
+                    val combined = (uiState.searchArtists + nextPlaylists).distinctBy { it.id }
+                    uiState.copy(
+                        searchArtists = combined,
+                        searchHasMoreArtists = nextPlaylists.size >= SEARCH_COLLECTION_PAGE_SIZE,
+                        isLoadingMoreSearch = false
+                    )
+                }
+            }
         }
     }
 
@@ -848,16 +1211,18 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
             }
             return
         }
-        if (loadedLyricSongId == song.id || lyricJob?.isActive == true) return
-        loadedLyricSongId = song.id
-        lyricJob?.cancel()
-        lyricJob = viewModelScope.launch {
-            uiState = uiState.copy(isLyricLoading = true)
-            val lines = runCatching { musicRepository.lyrics(song) }.getOrDefault(
-                listOf(LyricLine(0L, "暂时没有歌词"))
+        if (loadedLyricSongId != song.id) {
+            loadedLyricSongId = song.id
+            lyricJob?.cancel()
+            uiState = uiState.copy(
+                lyrics = emptyList(),
+                isLyricLoading = true
             )
-            if (playbackState.currentSong?.id == song.id) {
-                uiState = uiState.copy(lyrics = lines, isLyricLoading = false)
+            lyricJob = viewModelScope.launch {
+                val lines = loadLyricsWithRetry(song)
+                if (playbackState.currentSong?.id == song.id) {
+                    uiState = uiState.copy(lyrics = lines, isLyricLoading = false)
+                }
             }
         }
         if (loadedPlayerCommentSongId != song.id && playerCommentsJob?.isActive != true) {
@@ -869,6 +1234,65 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
             )
             loadPlayerComments(song, force = true)
         }
+    }
+
+    private suspend fun loadLyricsWithRetry(song: Song): List<LyricLine> {
+        repeat(LYRIC_LOAD_RETRY_COUNT) { attempt ->
+            val lines = runCatching { musicRepository.lyrics(song) }.getOrDefault(emptyList())
+            if (lines.hasRealLyrics()) return lines
+            if (playbackState.currentSong?.id != song.id) return emptyList()
+            delay(360L + attempt * 420L)
+        }
+        return runCatching { musicRepository.lyrics(song) }.getOrDefault(emptyList()).takeIf { it.hasRealLyrics() }
+            ?: listOf(LyricLine(0L, "暂时没有歌词"))
+    }
+
+    private fun List<LyricLine>.hasRealLyrics(): Boolean =
+        any { line ->
+            val text = line.text.trim()
+            text.isNotBlank() && text != "歌词加载中..." && text != "暂时没有歌词"
+        }
+
+    private fun syncStatusBarLyricWithPlayback() {
+        if (!uiState.playbackSettings.statusBarLyricEnabled) {
+            player.setNotificationLyric(enabled = false, lyricText = null)
+            return
+        }
+        val song = playbackState.currentSong ?: run {
+            player.setNotificationLyric(enabled = true, lyricText = null)
+            return
+        }
+        val activeLyric = uiState.lyrics
+            .lastOrNull { it.timeMs <= playbackState.positionMs }
+            ?.text
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?.takeIf { it != "歌词加载中..." && it != "暂时没有歌词" }
+        player.setNotificationLyric(
+            enabled = true,
+            lyricText = activeLyric ?: song.artist.ifBlank { "SiListen" }
+        )
+    }
+
+    private fun syncRecentPlayback() {
+        val song = playbackState.currentSong ?: run {
+            lastRecentSongId = null
+            return
+        }
+        if (song.id == lastRecentSongId) return
+        lastRecentSongId = song.id
+        addRecentPlayedSong(song)
+    }
+
+    private fun addRecentPlayedSong(song: Song) {
+        if (song.id.isBlank() || song.title.isBlank()) return
+        val nextSongs = buildList {
+            add(song)
+            addAll(uiState.recentPlayedSongs.filterNot { it.id == song.id })
+        }.take(RecentPlaybackStore.MAX_ITEMS)
+        if (nextSongs == uiState.recentPlayedSongs) return
+        uiState = uiState.copy(recentPlayedSongs = nextSongs)
+        recentPlaybackStore.save(nextSongs)
     }
 
     private fun loadThemeSettings(): ThemeSettingsState {
@@ -937,7 +1361,8 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         }.getOrDefault(LyricDisplayMode.Glass)
         return PlaybackSettingsState(
             quality = quality,
-            lyricDisplayMode = lyricDisplayMode
+            lyricDisplayMode = lyricDisplayMode,
+            statusBarLyricEnabled = playbackPreferences.getBoolean("status_bar_lyric", false)
         )
     }
 
@@ -945,10 +1370,16 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         playbackPreferences.edit()
             .putString("quality", settings.quality.name)
             .putString("lyric_display_mode", settings.lyricDisplayMode.name)
+            .putBoolean("status_bar_lyric", settings.statusBarLyricEnabled)
             .apply()
     }
 
     private companion object {
+        const val SEARCH_SONG_PAGE_SIZE = 30
+        const val SEARCH_COLLECTION_PAGE_SIZE = 20
+        const val ARTIST_SONG_PAGE_SIZE = 50
+        const val LYRIC_LOAD_RETRY_COUNT = 2
+
         val themePreferenceKeys = setOf(
             "mode",
             "accent",
@@ -970,7 +1401,11 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
 
     fun playPlaylist(playlist: MusicPlaylist, startIndex: Int = 0) {
         viewModelScope.launch {
-            val playable = if (playlist.songs.isEmpty() && playlist.id.startsWith("netease-playlist-")) {
+            val needsDetail = playlist.songs.isEmpty() &&
+                (playlist.id.startsWith("netease-playlist-") ||
+                    playlist.id.startsWith("netease-album-") ||
+                    playlist.id.startsWith("netease-artist-"))
+            val playable = if (needsDetail) {
                 runCatching { musicRepository.neteasePlaylistDetail(playlist) }.getOrDefault(playlist)
             } else {
                 playlist
@@ -983,20 +1418,43 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun playSong(song: Song) {
-        val queue = uiState.searchResults.takeIf { results -> results.any { it.id == song.id } }
+    private fun playbackQueueFor(song: Song): List<Song> =
+        uiState.searchResults.takeIf { results -> results.any { it.id == song.id } }
             ?: uiState.featured.firstOrNull { it.songs.any { item -> item.id == song.id } }?.songs
             ?: uiState.dailyDiscovery?.songs?.takeIf { songs -> songs.any { item -> item.id == song.id } }
             ?: uiState.personalFm?.songs?.takeIf { songs -> songs.any { item -> item.id == song.id } }
             ?: uiState.podcasts?.songs?.takeIf { songs -> songs.any { item -> item.id == song.id } }
             ?: uiState.cloudDrive?.songs?.takeIf { songs -> songs.any { item -> item.id == song.id } }
             ?: uiState.likedSongs?.songs?.takeIf { songs -> songs.any { item -> item.id == song.id } }
+            ?: uiState.artistSongsPage.songs.takeIf { songs -> songs.any { item -> item.id == song.id } }
             ?: uiState.selectedPlaylist?.songs?.takeIf { songs -> songs.any { item -> item.id == song.id } }
             ?: uiState.localSongs.takeIf { songs -> songs.any { item -> item.id == song.id } }
             ?: listOf(song)
+
+    fun playSong(song: Song) {
+        val queue = playbackQueueFor(song)
         val index = queue.indexOfFirst { it.id == song.id }.coerceAtLeast(0)
         viewModelScope.launch {
             player.playQueue(queue, index, registry)
+        }
+    }
+
+    fun playSongNext(song: Song) {
+        viewModelScope.launch {
+            val queued = player.queueNext(song, registry)
+            uiState = uiState.copy(
+                message = if (queued) "已添加到下一首播放" else "暂时无法添加到下一首播放"
+            )
+        }
+    }
+
+    fun playSongAndOpenComments(song: Song) {
+        val queue = playbackQueueFor(song)
+        val index = queue.indexOfFirst { it.id == song.id }.coerceAtLeast(0)
+        viewModelScope.launch {
+            player.playQueue(queue, index, registry)
+            playerSheetPanel = PlayerSheetPanel.Comments
+            isPlayerSheetVisible = true
         }
     }
 
@@ -1005,6 +1463,118 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
     fun isSongLikeLoading(song: Song): Boolean = song.id in uiState.songLikeLoadingIds
 
     fun toggleSongLike(song: Song) {
+        setSongLike(song = song, shouldLike = !isSongLiked(song))
+    }
+
+    fun addSongToLiked(song: Song) {
+        if (isSongLiked(song)) {
+            uiState = uiState.copy(
+                likePrompt = LikePromptState(song),
+                message = "已添加到我喜欢的音乐"
+            )
+            return
+        }
+        setSongLike(song = song, shouldLike = true)
+    }
+
+    fun addCurrentSongToLiked() {
+        val song = playbackState.currentSong
+        if (song == null) {
+            uiState = uiState.copy(message = "当前没有正在播放的歌曲")
+            return
+        }
+        addSongToLiked(song)
+    }
+
+    fun toggleCurrentSongLike() {
+        val song = playbackState.currentSong
+        if (song == null) {
+            uiState = uiState.copy(message = "当前没有正在播放的歌曲")
+            return
+        }
+        toggleSongLike(song)
+    }
+
+    fun dismissLikePrompt(songId: String? = null) {
+        val prompt = uiState.likePrompt ?: return
+        if (songId == null || prompt.song.id == songId) {
+            uiState = uiState.copy(likePrompt = null)
+        }
+    }
+
+    fun openAddToPlaylistChooser(song: Song? = uiState.likePrompt?.song ?: playbackState.currentSong) {
+        val target = song ?: run {
+            uiState = uiState.copy(message = "当前没有可加入歌单的歌曲")
+            return
+        }
+        if (target.sourceId != "netease") {
+            uiState = uiState.copy(message = "当前歌曲暂不支持加入网易云歌单")
+            return
+        }
+        if (!accountState.loginState.loggedIn) {
+            uiState = uiState.copy(message = "请先登录网易云账号后再加入歌单")
+            return
+        }
+        uiState = uiState.copy(playlistChooserSong = target)
+    }
+
+    fun closeAddToPlaylistChooser() {
+        uiState = uiState.copy(
+            playlistChooserSong = null,
+            playlistAddLoadingIds = emptySet()
+        )
+    }
+
+    fun isPlaylistAddLoading(playlist: MusicPlaylist): Boolean =
+        playlist.id in uiState.playlistAddLoadingIds
+
+    fun addPlaylistChooserSongToPlaylist(playlist: MusicPlaylist) {
+        val song = uiState.playlistChooserSong ?: playbackState.currentSong ?: run {
+            uiState = uiState.copy(message = "当前没有可加入歌单的歌曲")
+            return
+        }
+        if (song.sourceId != "netease" || playlist.kind != PlaylistKind.UserPlaylist) {
+            uiState = uiState.copy(message = "当前只支持加入网易云自建歌单")
+            return
+        }
+        if (!accountState.loginState.loggedIn) {
+            uiState = uiState.copy(message = "请先登录网易云账号后再加入歌单")
+            return
+        }
+        if (isPlaylistAddLoading(playlist)) return
+        uiState = uiState.copy(playlistAddLoadingIds = uiState.playlistAddLoadingIds + playlist.id)
+        viewModelScope.launch {
+            val result = runCatching {
+                musicRepository.neteaseAddSongToPlaylist(song, playlist)
+            }.getOrElse {
+                uiState = uiState.copy(
+                    playlistAddLoadingIds = uiState.playlistAddLoadingIds - playlist.id,
+                    message = "加入歌单失败：${it.message.orEmpty()}"
+                )
+                return@launch
+            }
+            if (result.success) {
+                uiState = uiState.copy(
+                    userPlaylists = uiState.userPlaylists.addSongToLoadedPlaylist(playlist.id, song),
+                    recommendedPlaylists = uiState.recommendedPlaylists.addSongToLoadedPlaylist(playlist.id, song),
+                    featured = uiState.featured.addSongToLoadedPlaylist(playlist.id, song),
+                    selectedPlaylist = uiState.selectedPlaylist?.let {
+                        if (it.id == playlist.id) it.withAddedSongIfLoaded(song) else it
+                    },
+                    playlistChooserSong = null,
+                    playlistAddLoadingIds = uiState.playlistAddLoadingIds - playlist.id,
+                    message = result.message
+                )
+            } else {
+                uiState = uiState.copy(
+                    playlistAddLoadingIds = uiState.playlistAddLoadingIds - playlist.id,
+                    message = result.message
+                )
+            }
+        }
+    }
+
+    private fun setSongLike(song: Song, shouldLike: Boolean) {
         if (song.sourceId != "netease") {
             uiState = uiState.copy(message = "当前只支持网易云歌曲红心")
             return
@@ -1014,7 +1584,6 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
             return
         }
         if (isSongLikeLoading(song)) return
-        val shouldLike = !isSongLiked(song)
         val loadingIds = uiState.songLikeLoadingIds + song.id
         uiState = uiState.copy(songLikeLoadingIds = loadingIds)
         viewModelScope.launch {
@@ -1046,7 +1615,14 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
                 likedSongIds = nextLikedIds,
                 likedSongs = nextLikedSongs,
                 songLikeLoadingIds = uiState.songLikeLoadingIds - song.id,
-                message = result.message
+                likePrompt = if (result.success && shouldLike) {
+                    LikePromptState(song, "已添加到我喜欢的音乐", showAddToPlaylistAction = true)
+                } else if (result.success && !shouldLike) {
+                    LikePromptState(song, "已从我喜欢的音乐移除", showAddToPlaylistAction = false)
+                } else {
+                    uiState.likePrompt
+                },
+                message = if (result.success) null else result.message
             )
         }
     }
@@ -1061,7 +1637,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
 
     fun seekTo(positionMs: Long) = player.seekTo(positionMs)
 
-    fun openPlayerSheet(panel: PlayerSheetPanel = PlayerSheetPanel.Lyrics) {
+    fun openPlayerSheet(panel: PlayerSheetPanel = PlayerSheetPanel.Detail) {
         if (playbackState.currentSong != null) {
             playerSheetPanel = panel
             isPlayerSheetVisible = true
@@ -1161,6 +1737,22 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
     private fun List<MusicPlaylist>.replacePlaylist(detail: MusicPlaylist): List<MusicPlaylist> =
         map { playlist -> if (playlist.id == detail.id) detail else playlist }
 
+    private fun List<MusicPlaylist>.addSongToLoadedPlaylist(playlistId: String, song: Song): List<MusicPlaylist> =
+        map { playlist -> if (playlist.id == playlistId) playlist.withAddedSongIfLoaded(song) else playlist }
+
+    private fun MusicPlaylist.withAddedSongIfLoaded(song: Song): MusicPlaylist {
+        if (songs.isEmpty()) return this
+        val nextSongs = buildList {
+            add(song)
+            addAll(songs.filterNot { it.id == song.id })
+        }
+        return copy(
+            songs = nextSongs,
+            coverUrl = coverUrl.ifBlank { song.coverUrl },
+            subtitle = "${nextSongs.size} 首歌曲"
+        )
+    }
+
     private fun isPlaylistSubscribed(playlist: MusicPlaylist): Boolean {
         return playlist.kind == PlaylistKind.LikedSongs ||
             playlist.kind == PlaylistKind.UserPlaylist ||
@@ -1174,8 +1766,12 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
             likedSongs = null,
             likedSongIds = emptySet(),
             songLikeLoadingIds = emptySet(),
+            likePrompt = null,
+            playlistChooserSong = null,
+            playlistAddLoadingIds = emptySet(),
             userPlaylists = emptyList(),
             selectedPlaylist = null,
+            playlistBackStack = emptyList(),
             selectedPlaylistRoute = PlaylistRoute.Overview,
             playlistSongSearchQuery = "",
             isPlaylistDetailLoading = false,
@@ -1192,12 +1788,14 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
 
     override fun onCleared() {
         themePreferences.unregisterOnSharedPreferenceChangeListener(themePreferenceListener)
+        PlaybackNotificationBridge.detachLikeHandler(notificationLikeHandler)
+        PlaybackNotificationBridge.detachLikeStateProvider(notificationLikeStateProvider)
         qrLoginJob?.cancel()
         searchJob?.cancel()
         smsCooldownJob?.cancel()
         lyricJob?.cancel()
         libraryJob?.cancel()
-        player.release()
+        playerCommentsJob?.cancel()
         super.onCleared()
     }
 }

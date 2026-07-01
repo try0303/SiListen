@@ -109,7 +109,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
@@ -117,7 +116,6 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -200,6 +198,8 @@ import com.kyant.backdrop.shadow.InnerShadow
 import com.kyant.backdrop.shadow.Shadow
 import com.qmdeve.liquidglass.widget.LiquidGlassView
 import com.silisten.app.AppTab
+import com.silisten.app.ArtistPageTab
+import com.silisten.app.ArtistSongsPageState
 import com.silisten.app.LyricDisplayMode
 import com.silisten.app.PlaybackSettingsState
 import com.silisten.app.PlayerSheetPanel
@@ -218,6 +218,7 @@ import com.silisten.app.data.model.MusicPlaylist
 import com.silisten.app.data.model.PlaybackQuality
 import com.silisten.app.data.model.PlaylistComment
 import com.silisten.app.data.model.PlaylistCommentSort
+import com.silisten.app.data.model.PlaylistKind
 import com.silisten.app.data.model.PlaylistRoute
 import com.silisten.app.data.model.Song
 import com.silisten.app.playback.PlaybackState
@@ -241,6 +242,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.android.awaitFrame
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
@@ -274,6 +276,9 @@ fun PlaylistDetailScreen(
     isSongLiked: (Song) -> Boolean,
     isSongLikeLoading: (Song) -> Boolean,
     onToggleSongLike: (Song) -> Unit,
+    onPlaySongNext: (Song) -> Unit,
+    onAddSongToPlaylist: (Song) -> Unit,
+    onShowSongComments: (Song) -> Unit,
     onToggleSubscription: () -> Unit,
     onShowSongs: () -> Unit,
     onShowComments: () -> Unit,
@@ -283,6 +288,7 @@ fun PlaylistDetailScreen(
     reserveMiniPlayerSpace: Boolean
 ) {
     var showInlineSearch by remember(playlist.id) { mutableStateOf(songSearchQuery.isNotBlank()) }
+    var actionSong by remember(playlist.id) { mutableStateOf<Song?>(null) }
     val pageColor = if (dark) Color(0xFF071008) else Color(0xFFF5F6F8)
     val cardColor = if (dark) Color(0xFF111A12) else Color.White
     val titleColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
@@ -600,7 +606,8 @@ fun PlaylistDetailScreen(
                                 liked = isSongLiked(song),
                                 likeLoading = isSongLikeLoading(song),
                                 onClick = { onSongClick(song) },
-                                onLikeClick = if (song.sourceId == "netease") ({ onToggleSongLike(song) }) else null
+                                onLikeClick = if (song.sourceId == "netease") ({ onToggleSongLike(song) }) else null,
+                                onMoreClick = { actionSong = song }
                             )
                         }
                     }
@@ -683,6 +690,709 @@ fun PlaylistDetailScreen(
                 glassy = glassy,
                 onClick = onBack,
                 modifier = Modifier.align(Alignment.TopStart)
+            )
+        }
+    }
+    actionSong?.let { song ->
+        SongActionSheetModal(
+            song = song,
+            dark = dark,
+            onDismiss = { actionSong = null },
+            onPlayNext = {
+                actionSong = null
+                onPlaySongNext(song)
+            },
+            onAddToPlaylist = {
+                actionSong = null
+                onAddSongToPlaylist(song)
+            },
+            onShowComments = {
+                actionSong = null
+                onShowSongComments(song)
+            }
+        )
+    }
+}
+
+private enum class ArtistDetailTab(val pageTab: ArtistPageTab, val label: String) {
+    Detail(ArtistPageTab.Detail, "详情"),
+    Hot(ArtistPageTab.Hot, "热门"),
+    Songs(ArtistPageTab.Songs, "单曲"),
+    Albums(ArtistPageTab.Albums, "专辑")
+}
+
+private fun ArtistPageTab.toArtistDetailTab(): ArtistDetailTab =
+    ArtistDetailTab.entries.firstOrNull { it.pageTab == this } ?: ArtistDetailTab.Detail
+
+@Composable
+fun ArtistDetailScreen(
+    artist: MusicPlaylist,
+    isLoading: Boolean,
+    message: String?,
+    selectedPageTab: ArtistPageTab,
+    artistSongsPage: ArtistSongsPageState,
+    dark: Boolean,
+    glassy: Boolean,
+    onBack: () -> Unit,
+    onPlayAll: () -> Unit,
+    onTabSelected: (ArtistPageTab) -> Unit,
+    onLoadMoreArtistSongs: () -> Unit,
+    onSongClick: (Song) -> Unit,
+    isSongLiked: (Song) -> Boolean,
+    isSongLikeLoading: (Song) -> Boolean,
+    onToggleSongLike: (Song) -> Unit,
+    onPlaySongNext: (Song) -> Unit,
+    onAddSongToPlaylist: (Song) -> Unit,
+    onShowSongComments: (Song) -> Unit,
+    onAlbumClick: (MusicPlaylist) -> Unit,
+    reserveMiniPlayerSpace: Boolean
+) {
+    val artistTabs = ArtistDetailTab.entries
+    val initialPage = artistTabs.indexOf(selectedPageTab.toArtistDetailTab()).coerceAtLeast(0)
+    val pagerState = rememberPagerState(initialPage = initialPage, pageCount = { artistTabs.size })
+    val scope = rememberCoroutineScope()
+    val selectedTab = artistTabs[pagerState.currentPage.coerceIn(0, artistTabs.lastIndex)]
+    val detailListState = rememberLazyListState()
+    val hotListState = rememberLazyListState()
+    val artistSongListState = rememberLazyListState()
+    val albumListState = rememberLazyListState()
+    var actionSong by remember(artist.id) { mutableStateOf<Song?>(null) }
+    val pageColor = if (dark) Color(0xFF080B0C) else Color(0xFFF6F6F7)
+    val cardColor = if (dark) Color(0xFF141718) else Color.White
+    val titleColor = if (dark) Color(0xFFF7F8F8) else Color(0xFF141414)
+    val mutedText = if (dark) Color.White.copy(alpha = 0.62f) else Color(0xFF666A70)
+    val borderColor = if (dark) Color.White.copy(alpha = 0.11f) else Color.Black.copy(alpha = 0.05f)
+    val hotSongs = remember(artist.songs) { artist.songs }
+    val artistSongs = if (artistSongsPage.artistId == artist.id) artistSongsPage.songs else emptyList()
+    val description = artist.description.ifBlank {
+        "暂时没有歌手简介。可以先查看热门歌曲和专辑，后续同步到更完整的网易云资料。"
+    }
+    LaunchedEffect(selectedPageTab, artist.id) {
+        val targetPage = artistTabs.indexOf(selectedPageTab.toArtistDetailTab()).coerceAtLeast(0)
+        if (pagerState.currentPage != targetPage) {
+            pagerState.scrollToPage(targetPage)
+        }
+    }
+    LaunchedEffect(pagerState, artist.id) {
+        snapshotFlow { pagerState.settledPage }
+            .distinctUntilChanged()
+            .collectLatest { page ->
+                artistTabs.getOrNull(page)?.pageTab?.let(onTabSelected)
+            }
+    }
+    LaunchedEffect(selectedPageTab, artist.id) {
+        if (selectedPageTab == ArtistPageTab.Songs) {
+            onLoadMoreArtistSongs()
+        }
+    }
+    LaunchedEffect(
+        artistSongListState,
+        selectedPageTab,
+        artistSongs.size,
+        artistSongsPage.hasMore,
+        artistSongsPage.isLoading
+    ) {
+        snapshotFlow {
+            val layoutInfo = artistSongListState.layoutInfo
+            val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            layoutInfo.totalItemsCount > 0 && lastVisible >= layoutInfo.totalItemsCount - 4
+        }
+            .distinctUntilChanged()
+            .filter { it }
+            .collectLatest {
+                if (selectedPageTab == ArtistPageTab.Songs && artistSongsPage.hasMore && !artistSongsPage.isLoading) {
+                    onLoadMoreArtistSongs()
+                }
+            }
+    }
+
+    Surface(color = pageColor, modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .padding(horizontal = 18.dp)
+        ) {
+            Spacer(Modifier.height(10.dp))
+            ArtistDetailTopBar(
+                title = artist.title,
+                dark = dark,
+                onBack = onBack
+            )
+            Spacer(Modifier.height(12.dp))
+            ArtistDetailTabs(
+                selected = selectedTab,
+                dark = dark,
+                onSelect = { tab ->
+                    scope.launch {
+                        pagerState.animateScrollToPage(artistTabs.indexOf(tab).coerceAtLeast(0))
+                        onTabSelected(tab.pageTab)
+                    }
+                }
+            )
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            ) { page ->
+                val currentTab = artistTabs[page]
+                val currentListState = when (currentTab) {
+                    ArtistDetailTab.Detail -> detailListState
+                    ArtistDetailTab.Hot -> hotListState
+                    ArtistDetailTab.Songs -> artistSongListState
+                    ArtistDetailTab.Albums -> albumListState
+                }
+                LazyColumn(
+                    state = currentListState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(
+                        top = 16.dp,
+                        bottom = if (reserveMiniPlayerSpace) 126.dp else 42.dp
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    item {
+                        ArtistHeroCard(
+                            artist = artist,
+                            dark = dark,
+                            glassy = glassy,
+                            titleColor = titleColor,
+                            mutedText = mutedText,
+                            cardColor = cardColor,
+                            borderColor = borderColor
+                        )
+                    }
+                    if (isLoading) {
+                        item {
+                            LoadingStateCard(
+                                text = "正在加载歌手详情...",
+                                dark = dark
+                            )
+                        }
+                    }
+                    message?.let {
+                        item {
+                            Text(
+                                text = it,
+                                color = if (dark) Color(0xFFFFD166) else Color(0xFF8A5A00),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                    when (currentTab) {
+                        ArtistDetailTab.Detail -> {
+                            item {
+                                ArtistDescriptionCard(
+                                    description = description,
+                                    dark = dark,
+                                    titleColor = titleColor,
+                                    mutedText = mutedText,
+                                    cardColor = cardColor,
+                                    borderColor = borderColor
+                                )
+                            }
+                            if (hotSongs.isNotEmpty()) {
+                                item {
+                                    ArtistSectionHeader(
+                                        title = "热门歌曲",
+                                        action = "播放",
+                                        dark = dark,
+                                        onAction = onPlayAll
+                                    )
+                                }
+                                itemsIndexed(hotSongs.take(5), key = { _, song -> song.id }) { index, song ->
+                                    ArtistSongSurface(
+                                        index = index + 1,
+                                        song = song,
+                                        dark = dark,
+                                        cardColor = cardColor,
+                                        borderColor = borderColor,
+                                        liked = isSongLiked(song),
+                                        likeLoading = isSongLikeLoading(song),
+                                        onClick = { onSongClick(song) },
+                                        onLikeClick = if (song.sourceId == "netease") ({ onToggleSongLike(song) }) else null,
+                                        onMoreClick = { actionSong = song }
+                                    )
+                                }
+                            }
+                        }
+                        ArtistDetailTab.Hot -> {
+                            item {
+                                ArtistSectionHeader(
+                                    title = "热门歌曲",
+                                    action = "播放全部",
+                                    dark = dark,
+                                    onAction = onPlayAll
+                                )
+                            }
+                            if (!isLoading && hotSongs.isEmpty()) {
+                                item {
+                                    EmptyStateCard(
+                                        title = "暂时没有热门歌曲",
+                                        subtitle = "网易云暂时没有返回这个歌手的热门歌曲。",
+                                        dark = dark
+                                    )
+                                }
+                            }
+                            itemsIndexed(hotSongs, key = { _, song -> song.id }) { index, song ->
+                                ArtistSongSurface(
+                                    index = index + 1,
+                                    song = song,
+                                    dark = dark,
+                                    cardColor = cardColor,
+                                    borderColor = borderColor,
+                                    liked = isSongLiked(song),
+                                    likeLoading = isSongLikeLoading(song),
+                                    onClick = { onSongClick(song) },
+                                    onLikeClick = if (song.sourceId == "netease") ({ onToggleSongLike(song) }) else null,
+                                    onMoreClick = { actionSong = song }
+                                )
+                            }
+                        }
+                        ArtistDetailTab.Songs -> {
+                            item {
+                                ArtistSectionHeader(
+                                    title = "单曲",
+                                    action = "播放全部",
+                                    dark = dark,
+                                    onAction = onPlayAll
+                                )
+                            }
+                            artistSongsPage.message?.let { pageMessage ->
+                                item {
+                                    Text(
+                                        text = pageMessage,
+                                        color = if (dark) Color(0xFFFFD166) else Color(0xFF8A5A00),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                            if (!artistSongsPage.isLoading && artistSongs.isEmpty()) {
+                                item {
+                                    EmptyStateCard(
+                                        title = "暂时没有单曲",
+                                        subtitle = "这里会展示网易云返回的歌手全部单曲。",
+                                        dark = dark
+                                    )
+                                }
+                            }
+                            itemsIndexed(artistSongs, key = { _, song -> song.id }) { index, song ->
+                                ArtistSongSurface(
+                                    index = index + 1,
+                                    song = song,
+                                    dark = dark,
+                                    cardColor = cardColor,
+                                    borderColor = borderColor,
+                                    liked = isSongLiked(song),
+                                    likeLoading = isSongLikeLoading(song),
+                                    onClick = { onSongClick(song) },
+                                    onLikeClick = if (song.sourceId == "netease") ({ onToggleSongLike(song) }) else null,
+                                    onMoreClick = { actionSong = song }
+                                )
+                            }
+                            if (artistSongsPage.isLoading || artistSongsPage.hasMore) {
+                                item {
+                                    LoadingStateCard(
+                                        text = if (artistSongsPage.isLoading) "正在加载更多单曲..." else "上滑继续加载更多单曲",
+                                        dark = dark
+                                    )
+                                }
+                            }
+                        }
+                        ArtistDetailTab.Albums -> {
+                            item {
+                                ArtistSectionHeader(
+                                    title = "专辑",
+                                    action = null,
+                                    dark = dark,
+                                    onAction = {}
+                                )
+                            }
+                            if (!isLoading && artist.albums.isEmpty()) {
+                                item {
+                                    EmptyStateCard(
+                                        title = "暂时没有专辑",
+                                        subtitle = "网易云暂时没有返回这个歌手的专辑列表。",
+                                        dark = dark
+                                    )
+                                }
+                            }
+                            items(artist.albums, key = { it.id }) { album ->
+                                ArtistAlbumRow(
+                                    album = album,
+                                    dark = dark,
+                                    cardColor = cardColor,
+                                    borderColor = borderColor,
+                                    onClick = { onAlbumClick(album) }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    actionSong?.let { song ->
+        SongActionSheetModal(
+            song = song,
+            dark = dark,
+            onDismiss = { actionSong = null },
+            onPlayNext = {
+                actionSong = null
+                onPlaySongNext(song)
+            },
+            onAddToPlaylist = {
+                actionSong = null
+                onAddSongToPlaylist(song)
+            },
+            onShowComments = {
+                actionSong = null
+                onShowSongComments(song)
+            }
+        )
+    }
+}
+
+@Composable
+private fun ArtistDetailTopBar(
+    title: String,
+    dark: Boolean,
+    onBack: () -> Unit
+) {
+    val titleColor = if (dark) Color(0xFFF7F8F8) else Color(0xFF141414)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(54.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        IconButton(
+            onClick = onBack,
+            modifier = Modifier
+                .size(46.dp)
+                .clip(CircleShape)
+                .background(if (dark) Color.White.copy(alpha = 0.08f) else Color.White.copy(alpha = 0.78f))
+        ) {
+            Icon(
+                Icons.AutoMirrored.Rounded.ArrowBack,
+                contentDescription = "返回",
+                tint = titleColor,
+                modifier = Modifier.size(28.dp)
+            )
+        }
+        Spacer(Modifier.width(14.dp))
+        Text(
+            text = title,
+            color = titleColor,
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Black,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
+private fun ArtistDetailTabs(
+    selected: ArtistDetailTab,
+    dark: Boolean,
+    onSelect: (ArtistDetailTab) -> Unit
+) {
+    val accent = MaterialTheme.colorScheme.primary
+    val normal = if (dark) Color.White.copy(alpha = 0.62f) else Color(0xFF545860)
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        ArtistDetailTab.entries.forEach { tab ->
+            val active = tab == selected
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .noRippleClick(shape = RoundedCornerShape(16.dp)) { onSelect(tab) }
+                    .padding(vertical = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = tab.label,
+                    color = if (active) accent else normal,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = if (active) FontWeight.Black else FontWeight.Bold
+                )
+                Spacer(Modifier.height(8.dp))
+                Box(
+                    modifier = Modifier
+                        .width(if (active) 30.dp else 0.dp)
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(if (active) accent else Color.Transparent)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ArtistHeroCard(
+    artist: MusicPlaylist,
+    dark: Boolean,
+    glassy: Boolean,
+    titleColor: Color,
+    mutedText: Color,
+    cardColor: Color,
+    borderColor: Color
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 62.dp),
+        contentAlignment = Alignment.TopCenter
+    ) {
+        LiquidGlassPane(
+            enabled = glassy,
+            dark = dark,
+            shape = RoundedCornerShape(30.dp),
+            cornerRadius = 30.dp,
+            tintAlpha = if (dark) 0.12f else 0.10f,
+            blurRadius = 18.dp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 58.dp)
+        ) {
+            Surface(
+                color = cardColor.copy(alpha = if (dark) 0.78f else 0.86f),
+                border = BorderStroke(1.dp, borderColor),
+                shape = RoundedCornerShape(30.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(start = 18.dp, end = 18.dp, top = 88.dp, bottom = 24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = artist.title,
+                        color = titleColor,
+                        style = MaterialTheme.typography.headlineLarge,
+                        fontWeight = FontWeight.Black,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.height(24.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly
+                    ) {
+                        ArtistStatBlock("${artist.albumCount.coerceAtLeast(artist.albums.size)}", "专辑", titleColor, mutedText)
+                        ArtistStatBlock("${artist.songCount.coerceAtLeast(artist.songs.size)}", "单曲", titleColor, mutedText)
+                        ArtistStatBlock("${artist.mvCount}", "MV", titleColor, mutedText)
+                    }
+                }
+            }
+        }
+        AsyncImage(
+            model = artist.coverUrl.ifBlank { null },
+            contentDescription = artist.title,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .size(150.dp)
+                .clip(CircleShape)
+                .background(Color(0xFF222222))
+                .shadow(18.dp, CircleShape, clip = false)
+        )
+    }
+}
+
+@Composable
+private fun ArtistStatBlock(
+    value: String,
+    label: String,
+    titleColor: Color,
+    mutedText: Color
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            text = value,
+            color = titleColor,
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Black
+        )
+        Spacer(Modifier.height(3.dp))
+        Text(
+            text = label,
+            color = mutedText,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+@Composable
+private fun ArtistDescriptionCard(
+    description: String,
+    dark: Boolean,
+    titleColor: Color,
+    mutedText: Color,
+    cardColor: Color,
+    borderColor: Color
+) {
+    Surface(
+        color = cardColor,
+        border = BorderStroke(1.dp, borderColor),
+        shape = RoundedCornerShape(26.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = "歌手简介",
+                color = titleColor,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Black
+            )
+            Text(
+                text = description,
+                color = if (dark) mutedText.copy(alpha = 0.92f) else Color(0xFF4E5259),
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium,
+                lineHeight = 26.sp
+            )
+        }
+    }
+}
+
+@Composable
+private fun ArtistSectionHeader(
+    title: String,
+    action: String?,
+    dark: Boolean,
+    onAction: () -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = title,
+            color = if (dark) Color(0xFFF7F8F8) else Color(0xFF141414),
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Black,
+            modifier = Modifier.weight(1f)
+        )
+        if (action != null) {
+            PlaylistActionChip(
+                text = action,
+                dark = dark,
+                selected = false,
+                onClick = onAction
+            )
+        }
+    }
+}
+
+@Composable
+private fun ArtistSongSurface(
+    index: Int,
+    song: Song,
+    dark: Boolean,
+    cardColor: Color,
+    borderColor: Color,
+    liked: Boolean,
+    likeLoading: Boolean,
+    onClick: () -> Unit,
+    onLikeClick: (() -> Unit)?,
+    onMoreClick: () -> Unit
+) {
+    Surface(
+        color = cardColor,
+        border = BorderStroke(1.dp, borderColor),
+        shape = RoundedCornerShape(20.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = index.toString(),
+                color = if (dark) Color.White.copy(alpha = 0.72f) else Color(0xFF737780),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Black,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.width(42.dp)
+            )
+            Box(Modifier.weight(1f)) {
+                SongRow(
+                    song = song,
+                    liked = liked,
+                    likeLoading = likeLoading,
+                    onClick = onClick,
+                    onLikeClick = onLikeClick,
+                    onMoreClick = onMoreClick
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ArtistAlbumRow(
+    album: MusicPlaylist,
+    dark: Boolean,
+    cardColor: Color,
+    borderColor: Color,
+    onClick: () -> Unit
+) {
+    val titleColor = if (dark) Color(0xFFF7F8F8) else Color(0xFF141414)
+    val mutedText = if (dark) Color.White.copy(alpha = 0.58f) else Color(0xFF6B6F75)
+    Surface(
+        color = cardColor,
+        border = BorderStroke(1.dp, borderColor),
+        shape = RoundedCornerShape(22.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .noRippleClick(shape = RoundedCornerShape(22.dp), onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            AsyncImage(
+                model = album.coverUrl.ifBlank { null },
+                contentDescription = album.title,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .size(62.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(Color(0xFF252525))
+            )
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = album.title,
+                    color = titleColor,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Black,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = album.subtitle.ifBlank { "专辑" },
+                    color = mutedText,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Icon(
+                Icons.Rounded.ChevronRight,
+                contentDescription = null,
+                tint = mutedText,
+                modifier = Modifier.size(24.dp)
             )
         }
     }

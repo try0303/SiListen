@@ -40,7 +40,7 @@ class MainActivity : ComponentActivity() {
         contentView.setContent {
             val viewModel: SiListenViewModel = viewModel()
             LaunchedEffect(viewModel) {
-                handleOpenPlayerIntent(viewModel)
+                handlePlaybackIntent(viewModel)
             }
             SiListenTheme(viewModel.uiState.themeSettings) {
                 SiListenApp(viewModel)
@@ -51,7 +51,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        contentViewModel()?.let(::handleOpenPlayerIntent)
+        contentViewModel()?.let(::handlePlaybackIntent)
     }
 
     private fun requestNotificationPermissionIfNeeded() {
@@ -66,14 +66,23 @@ class MainActivity : ComponentActivity() {
         }.getOrNull()
     }
 
-    private fun handleOpenPlayerIntent(viewModel: SiListenViewModel) {
+    private fun handlePlaybackIntent(viewModel: SiListenViewModel) {
         val currentIntent = intent ?: return
-        if (!currentIntent.getBooleanExtra("open_player", false)) return
-        val panel = currentIntent.getStringExtra("player_panel")
-            ?.let { runCatching { PlayerSheetPanel.valueOf(it) }.getOrNull() }
-            ?: PlayerSheetPanel.Lyrics
-        viewModel.openPlayerSheet(panel)
-        currentIntent.removeExtra("open_player")
-        currentIntent.removeExtra("player_panel")
+        if (currentIntent.getBooleanExtra(EXTRA_TOGGLE_CURRENT_LIKE, false)) {
+            viewModel.toggleCurrentSongLike()
+            currentIntent.removeExtra(EXTRA_TOGGLE_CURRENT_LIKE)
+        }
+        if (currentIntent.getBooleanExtra("open_player", false)) {
+            val panel = currentIntent.getStringExtra("player_panel")
+                ?.let { runCatching { PlayerSheetPanel.valueOf(it) }.getOrNull() }
+                ?: PlayerSheetPanel.Lyrics
+            viewModel.openPlayerSheet(panel)
+            currentIntent.removeExtra("open_player")
+            currentIntent.removeExtra("player_panel")
+        }
+    }
+
+    companion object {
+        const val EXTRA_TOGGLE_CURRENT_LIKE = "com.silisten.app.extra.TOGGLE_CURRENT_LIKE"
     }
 }

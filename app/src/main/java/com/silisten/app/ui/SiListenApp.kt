@@ -26,10 +26,10 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.animateFloat
@@ -127,6 +127,8 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -218,6 +220,7 @@ import com.silisten.app.data.model.MusicPlaylist
 import com.silisten.app.data.model.PlaybackQuality
 import com.silisten.app.data.model.PlaylistComment
 import com.silisten.app.data.model.PlaylistCommentSort
+import com.silisten.app.data.model.PlaylistKind
 import com.silisten.app.data.model.PlaylistRoute
 import com.silisten.app.data.model.Song
 import com.silisten.app.playback.PlaybackState
@@ -249,8 +252,56 @@ import top.yukonga.miuix.kmp.blur.LayerBackdrop as MiuixLayerBackdrop
 import top.yukonga.miuix.kmp.blur.layerBackdrop as miuixLayerBackdrop
 import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop as rememberMiuixLayerBackdrop
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlin.math.sign
 import kotlin.math.sqrt
+
+private sealed interface SearchChromeState {
+    data object Closed : SearchChromeState
+    data class DockExpanded(val origin: AppTab) : SearchChromeState
+    data class SearchPage(val origin: AppTab) : SearchChromeState
+}
+
+private fun SearchChromeState.originOrNull(): AppTab? = when (this) {
+    SearchChromeState.Closed -> null
+    is SearchChromeState.DockExpanded -> origin
+    is SearchChromeState.SearchPage -> origin
+}
+
+private val SearchChromeStateSaver = listSaver<SearchChromeState, String>(
+    save = { state ->
+        when (state) {
+            SearchChromeState.Closed -> listOf("closed", AppTab.Home.name)
+            is SearchChromeState.DockExpanded -> listOf("dock", state.origin.name)
+            is SearchChromeState.SearchPage -> listOf("page", state.origin.name)
+        }
+    },
+    restore = { values ->
+        val origin = values.getOrNull(1)
+            ?.let { name -> runCatching { AppTab.valueOf(name) }.getOrNull() }
+            ?: AppTab.Home
+        when (values.firstOrNull()) {
+            "dock" -> SearchChromeState.DockExpanded(origin)
+            "page" -> SearchChromeState.SearchPage(origin)
+            else -> SearchChromeState.Closed
+        }
+    }
+)
+
+private fun paddingForSearchOverlay(
+    hasPlayback: Boolean,
+    hasDock: Boolean,
+    floating: Boolean
+): Dp {
+    var bottom = 24.dp
+    if (hasPlayback) {
+        bottom += if (floating) 100.dp else 92.dp
+    }
+    if (hasDock) {
+        bottom += if (floating) 104.dp else 84.dp
+    }
+    return bottom.coerceAtLeast(156.dp)
+}
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -267,36 +318,137 @@ fun SiListenApp(viewModel: SiListenViewModel) {
         drawContent()
     }
     val appearance = LocalSiListenAppearance.current
-    val mainTabs = remember { listOf(AppTab.Home, AppTab.Search, AppTab.Sources, AppTab.Account) }
-    val selectedMainTab = if (uiState.selectedTab in mainTabs) uiState.selectedTab else AppTab.Account
-    val selectedPage = mainTabs.indexOf(selectedMainTab).coerceAtLeast(0)
+    val mainTabs = remember { listOf(AppTab.Home, AppTab.Sources, AppTab.Account) }
+    var currentMainTab by rememberSaveable {
+        mutableStateOf(
+            uiState.selectedTab.takeIf { it in mainTabs } ?: AppTab.Home
+        )
+    }
+    var searchChromeState by rememberSaveable(stateSaver = SearchChromeStateSaver) {
+        mutableStateOf<SearchChromeState>(SearchChromeState.Closed)
+    }
+    var returnToSearchOrigin by rememberSaveable { mutableStateOf<AppTab?>(null) }
+    val searchOriginTab = searchChromeState.originOrNull()
+    val isSearchDockExpanded = searchChromeState is SearchChromeState.DockExpanded
+    val isSearchPageVisible = searchChromeState is SearchChromeState.SearchPage
+    val bottomSelectedTab = searchOriginTab ?: currentMainTab
+    val selectedPage = mainTabs.indexOf(currentMainTab).coerceAtLeast(0)
     val pagerState = rememberPagerState(initialPage = selectedPage, pageCount = { mainTabs.size })
     val pagerScope = rememberCoroutineScope()
+    var lockedMainTab by remember { mutableStateOf<AppTab?>(null) }
     val pagerPosition by remember {
         derivedStateOf {
             (pagerState.currentPage + pagerState.currentPageOffsetFraction)
                 .fastCoerceIn(0f, (mainTabs.size - 1).toFloat())
         }
     }
+    val visibleMainTab by remember {
+        derivedStateOf {
+            val index = pagerPosition.roundToInt().coerceIn(0, mainTabs.lastIndex)
+            mainTabs[index]
+        }
+    }
+    fun captureSearchOrigin(): AppTab {
+        val currentPageTab = mainTabs.getOrNull(pagerState.currentPage)
+        val settledPageTab = mainTabs.getOrNull(pagerState.settledPage)
+        return when {
+            pagerState.isScrollInProgress -> visibleMainTab
+            currentMainTab in mainTabs -> currentMainTab
+            currentPageTab != null -> currentPageTab
+            settledPageTab != null -> settledPageTab
+            else -> AppTab.Home
+        }
+    }
+    fun settleMainTab(tab: AppTab) {
+        val index = mainTabs.indexOf(tab)
+        if (index < 0) return
+        lockedMainTab = tab
+        pagerScope.launch {
+            if (pagerState.currentPage != index) {
+                pagerState.animateScrollToPage(index)
+            }
+            snapshotFlow { pagerState.settledPage }
+                .filter { it == index }
+                .first()
+            if (lockedMainTab == tab) {
+                lockedMainTab = null
+            }
+        }
+    }
+
+    fun openPlaylistFromSearch(playlist: MusicPlaylist) {
+        val origin = searchChromeState.originOrNull() ?: captureSearchOrigin()
+        returnToSearchOrigin = origin
+        searchChromeState = SearchChromeState.Closed
+        currentMainTab = origin
+        viewModel.selectTab(origin)
+        settleMainTab(origin)
+        viewModel.openPlaylist(playlist)
+    }
+
+    fun closePlaylistWithReturn() {
+        val hadPlaylistBackStack = uiState.playlistBackStack.isNotEmpty()
+        viewModel.closePlaylist()
+        if (!hadPlaylistBackStack) {
+            returnToSearchOrigin?.let { origin ->
+                searchChromeState = SearchChromeState.SearchPage(origin)
+                currentMainTab = origin
+                viewModel.selectTab(origin)
+                settleMainTab(origin)
+                returnToSearchOrigin = null
+            }
+        }
+    }
 
     LaunchedEffect(selectedPage) {
         if (pagerState.currentPage != selectedPage) {
+            lockedMainTab = currentMainTab
             pagerState.animateScrollToPage(selectedPage)
+        }
+    }
+
+    LaunchedEffect(uiState.selectedTab, searchChromeState) {
+        if (
+            searchChromeState is SearchChromeState.Closed &&
+            uiState.selectedTab in mainTabs &&
+            uiState.selectedTab != currentMainTab
+        ) {
+            currentMainTab = uiState.selectedTab
         }
     }
 
     val latestSettingsRoute = androidx.compose.runtime.rememberUpdatedState(uiState.settingsRoute)
     val latestSelectedTab = androidx.compose.runtime.rememberUpdatedState(uiState.selectedTab)
+    val latestLockedMainTab = androidx.compose.runtime.rememberUpdatedState(lockedMainTab)
 
     LaunchedEffect(pagerState) {
         snapshotFlow { pagerState.settledPage }.collectLatest { page ->
             if (latestSettingsRoute.value == SettingsRoute.Main) {
                 val targetTab = mainTabs.getOrNull(page) ?: AppTab.Home
+                val lockedTab = latestLockedMainTab.value
+                if (lockedTab != null && targetTab != lockedTab) {
+                    return@collectLatest
+                }
+                if (lockedTab == targetTab) {
+                    lockedMainTab = null
+                }
+                currentMainTab = targetTab
                 if (latestSelectedTab.value != targetTab) {
                     viewModel.selectTab(targetTab)
                 }
             }
         }
+    }
+
+    BackHandler(
+        enabled = isSearchPageVisible || isSearchDockExpanded
+    ) {
+        returnToSearchOrigin = null
+        val origin = searchChromeState.originOrNull() ?: currentMainTab
+        searchChromeState = SearchChromeState.Closed
+        currentMainTab = origin
+        viewModel.selectTab(origin)
+        settleMainTab(origin)
     }
 
     BackHandler(
@@ -308,19 +460,19 @@ fun SiListenApp(viewModel: SiListenViewModel) {
     BackHandler(
         enabled = uiState.settingsRoute == SettingsRoute.Main &&
             selectedPlaylist == null &&
-            selectedMainTab != AppTab.Home
+            searchChromeState is SearchChromeState.Closed &&
+            currentMainTab != AppTab.Home
     ) {
+        currentMainTab = AppTab.Home
         viewModel.selectTab(AppTab.Home)
-        pagerScope.launch {
-            pagerState.animateScrollToPage(0)
-        }
+        settleMainTab(AppTab.Home)
     }
 
     BackHandler(enabled = selectedPlaylist != null) {
         if (uiState.selectedPlaylistRoute == PlaylistRoute.Comments) {
             viewModel.showPlaylistOverview()
         } else {
-            viewModel.closePlaylist()
+            closePlaylistWithReturn()
         }
     }
 
@@ -366,50 +518,85 @@ fun SiListenApp(viewModel: SiListenViewModel) {
                             ) { page ->
                                 when (mainTabs[page]) {
                                     AppTab.Home -> HomeScreen(uiState, viewModel, padding)
-                                    AppTab.Search -> SearchScreen(uiState, viewModel, padding)
                                     AppTab.Sources -> SourcesScreen(uiState, viewModel, padding)
-                                    AppTab.Account -> AccountScreen(viewModel, padding)
-                                    AppTab.Settings -> AccountScreen(viewModel, padding)
+                                    AppTab.Account -> AccountScreen(
+                                        viewModel = viewModel,
+                                        padding = padding,
+                                        onSearch = {
+                                            searchChromeState = SearchChromeState.SearchPage(captureSearchOrigin())
+                                            returnToSearchOrigin = null
+                                        }
+                                    )
+                                    AppTab.Search,
+                                    AppTab.Settings -> HomeScreen(uiState, viewModel, padding)
                                 }
                             }
                         }
 
                         if (selectedPlaylist != null) {
-                            PlaylistDetailScreen(
-                                playlist = selectedPlaylist,
-                                route = uiState.selectedPlaylistRoute,
-                                songSearchQuery = uiState.playlistSongSearchQuery,
-                                isLoading = uiState.isPlaylistDetailLoading,
-                                message = uiState.playlistDetailMessage,
-                                commentSort = uiState.playlistCommentSort,
-                                comments = uiState.playlistComments,
-                                commentCount = uiState.playlistCommentCount,
-                                isCommentsLoading = uiState.isPlaylistCommentsLoading,
-                                commentsMessage = uiState.playlistCommentsMessage,
-                                isSubscribed = viewModel.isSelectedPlaylistSubscribed(),
-                                isSubscriptionLoading = uiState.isPlaylistSubscriptionLoading,
-                                dark = resolvedDark,
-                                glassy = appearance.blurEnabled,
-                                onBack = {
-                                    if (uiState.selectedPlaylistRoute == PlaylistRoute.Comments) {
-                                        viewModel.showPlaylistOverview()
-                                    } else {
-                                        viewModel.closePlaylist()
-                                    }
-                                },
-                                onPlayAll = { viewModel.playSelectedPlaylist() },
-                                onSongClick = { song -> viewModel.playSong(song) },
-                                isSongLiked = viewModel::isSongLiked,
-                                isSongLikeLoading = viewModel::isSongLikeLoading,
-                                onToggleSongLike = viewModel::toggleSongLike,
-                                onToggleSubscription = viewModel::toggleSelectedPlaylistSubscription,
-                                onShowSongs = viewModel::showPlaylistOverview,
-                                onShowComments = viewModel::showPlaylistComments,
-                                onRefreshComments = viewModel::refreshPlaylistComments,
-                                onSongSearchQueryChange = viewModel::updatePlaylistSongSearchQuery,
-                                onCommentSortChange = viewModel::selectPlaylistCommentSort,
-                                reserveMiniPlayerSpace = hasActivePlayback
-                            )
+                            if (selectedPlaylist.kind == PlaylistKind.Artist) {
+                                ArtistDetailScreen(
+                                    artist = selectedPlaylist,
+                                    isLoading = uiState.isPlaylistDetailLoading,
+                                    message = uiState.playlistDetailMessage,
+                                    selectedPageTab = uiState.selectedArtistTab,
+                                    artistSongsPage = uiState.artistSongsPage,
+                                    dark = resolvedDark,
+                                    glassy = appearance.blurEnabled,
+                                    onBack = ::closePlaylistWithReturn,
+                                    onPlayAll = { viewModel.playSelectedArtistTab() },
+                                    onTabSelected = viewModel::selectArtistTab,
+                                    onLoadMoreArtistSongs = { viewModel.loadMoreArtistSongs() },
+                                    onSongClick = { song -> viewModel.playSong(song) },
+                                    isSongLiked = viewModel::isSongLiked,
+                                    isSongLikeLoading = viewModel::isSongLikeLoading,
+                                    onToggleSongLike = viewModel::toggleSongLike,
+                                    onPlaySongNext = viewModel::playSongNext,
+                                    onAddSongToPlaylist = viewModel::openAddToPlaylistChooser,
+                                    onShowSongComments = viewModel::playSongAndOpenComments,
+                                    onAlbumClick = viewModel::openPlaylist,
+                                    reserveMiniPlayerSpace = hasActivePlayback
+                                )
+                            } else {
+                                PlaylistDetailScreen(
+                                    playlist = selectedPlaylist,
+                                    route = uiState.selectedPlaylistRoute,
+                                    songSearchQuery = uiState.playlistSongSearchQuery,
+                                    isLoading = uiState.isPlaylistDetailLoading,
+                                    message = uiState.playlistDetailMessage,
+                                    commentSort = uiState.playlistCommentSort,
+                                    comments = uiState.playlistComments,
+                                    commentCount = uiState.playlistCommentCount,
+                                    isCommentsLoading = uiState.isPlaylistCommentsLoading,
+                                    commentsMessage = uiState.playlistCommentsMessage,
+                                    isSubscribed = viewModel.isSelectedPlaylistSubscribed(),
+                                    isSubscriptionLoading = uiState.isPlaylistSubscriptionLoading,
+                                    dark = resolvedDark,
+                                    glassy = appearance.blurEnabled,
+                                    onBack = {
+                                        if (uiState.selectedPlaylistRoute == PlaylistRoute.Comments) {
+                                            viewModel.showPlaylistOverview()
+                                        } else {
+                                            closePlaylistWithReturn()
+                                        }
+                                    },
+                                    onPlayAll = { viewModel.playSelectedPlaylist() },
+                                    onSongClick = { song -> viewModel.playSong(song) },
+                                    isSongLiked = viewModel::isSongLiked,
+                                    isSongLikeLoading = viewModel::isSongLikeLoading,
+                                    onToggleSongLike = viewModel::toggleSongLike,
+                                    onPlaySongNext = viewModel::playSongNext,
+                                    onAddSongToPlaylist = viewModel::openAddToPlaylistChooser,
+                                    onShowSongComments = viewModel::playSongAndOpenComments,
+                                    onToggleSubscription = viewModel::toggleSelectedPlaylistSubscription,
+                                    onShowSongs = viewModel::showPlaylistOverview,
+                                    onShowComments = viewModel::showPlaylistComments,
+                                    onRefreshComments = viewModel::refreshPlaylistComments,
+                                    onSongSearchQueryChange = viewModel::updatePlaylistSongSearchQuery,
+                                    onCommentSortChange = viewModel::selectPlaylistCommentSort,
+                                    reserveMiniPlayerSpace = hasActivePlayback
+                                )
+                            }
                         }
                     }
                 }
@@ -424,19 +611,114 @@ fun SiListenApp(viewModel: SiListenViewModel) {
                         hideNavDock = selectedPlaylist != null,
                         backdrop = appBackdrop,
                         miuixBackdrop = miuixAppBackdrop,
-                        selected = selectedMainTab,
+                        selected = bottomSelectedTab,
                         selectedPosition = if (uiState.settingsRoute == SettingsRoute.Main) pagerPosition else null,
                         onSelect = { tab ->
-                            val index = mainTabs.indexOf(tab)
+                            searchChromeState = SearchChromeState.Closed
+                            returnToSearchOrigin = null
+                            currentMainTab = tab
                             viewModel.selectTab(tab)
-                            if (index >= 0) {
-                                pagerScope.launch {
-                                    pagerState.animateScrollToPage(index)
-                                }
-                            }
+                            settleMainTab(tab)
+                        },
+                        searchExpanded = isSearchDockExpanded,
+                        onSearchExpand = {
+                            val origin = captureSearchOrigin()
+                            returnToSearchOrigin = null
+                            searchChromeState = SearchChromeState.DockExpanded(origin)
+                        },
+                        onSearchSubmit = {
+                            val origin = searchChromeState.originOrNull() ?: captureSearchOrigin()
+                            searchChromeState = SearchChromeState.SearchPage(origin)
+                            returnToSearchOrigin = null
                         }
                     )
                 }
+            }
+
+            AnimatedVisibility(
+                visible = isSearchPageVisible,
+                enter = slideInVertically(
+                    animationSpec = spring(dampingRatio = 0.86f, stiffness = 430f),
+                    initialOffsetY = { fullHeight -> fullHeight }
+                ) + fadeIn(animationSpec = tween(120)),
+                exit = slideOutVertically(
+                    animationSpec = tween(180),
+                    targetOffsetY = { fullHeight -> fullHeight }
+                ) + fadeOut(animationSpec = tween(120)),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .zIndex(18f)
+            ) {
+                val origin = searchChromeState.originOrNull() ?: captureSearchOrigin()
+                SearchOverlay(
+                    uiState = uiState,
+                    viewModel = viewModel,
+                    dark = resolvedDark,
+                    autoFocus = isSearchPageVisible,
+                    bottomPadding = paddingForSearchOverlay(
+                        hasPlayback = viewModel.playbackState.currentSong != null ||
+                            viewModel.playbackState.errorMessage != null,
+                        hasDock = selectedPlaylist == null,
+                        floating = appearance.floatingBottomBarEnabled
+                    ),
+                    onClose = {
+                        searchChromeState = SearchChromeState.Closed
+                        returnToSearchOrigin = null
+                        currentMainTab = origin
+                        viewModel.selectTab(origin)
+                        settleMainTab(origin)
+                    },
+                    onOpenPlaylist = ::openPlaylistFromSearch
+                )
+            }
+
+            if (isSearchPageVisible) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .zIndex(29f)
+                ) {
+                    SiListenBottomChrome(
+                        viewModel = viewModel,
+                        hideNavDock = selectedPlaylist != null,
+                        backdrop = appBackdrop,
+                        miuixBackdrop = miuixAppBackdrop,
+                        selected = bottomSelectedTab,
+                        selectedPosition = if (uiState.settingsRoute == SettingsRoute.Main) pagerPosition else null,
+                        onSelect = { tab ->
+                            searchChromeState = SearchChromeState.Closed
+                            returnToSearchOrigin = null
+                            currentMainTab = tab
+                            viewModel.selectTab(tab)
+                            settleMainTab(tab)
+                        },
+                        searchExpanded = false,
+                        onSearchExpand = {
+                            val origin = searchChromeState.originOrNull() ?: captureSearchOrigin()
+                            returnToSearchOrigin = null
+                            searchChromeState = SearchChromeState.SearchPage(origin)
+                        },
+                        onSearchSubmit = {
+                            val origin = searchChromeState.originOrNull() ?: captureSearchOrigin()
+                            searchChromeState = SearchChromeState.SearchPage(origin)
+                            returnToSearchOrigin = null
+                        }
+                    )
+                }
+            }
+
+            if (!viewModel.isPlayerSheetVisible) {
+                LikeAddedPrompt(
+                    prompt = uiState.likePrompt,
+                    accent = uiState.themeSettings.accentColor(),
+                    onAddToPlaylist = viewModel::openAddToPlaylistChooser,
+                    onDismiss = viewModel::dismissLikePrompt,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .statusBarsPadding()
+                        .padding(top = 18.dp, start = 18.dp, end = 18.dp)
+                        .zIndex(30f)
+                )
             }
 
             if (viewModel.isPlayerSheetVisible) {
@@ -461,18 +743,41 @@ fun SiListenApp(viewModel: SiListenViewModel) {
                         initialPanel = viewModel.playerSheetPanel,
                         isLiked = viewModel.playbackState.currentSong?.let(viewModel::isSongLiked) == true,
                         isLikeLoading = viewModel.playbackState.currentSong?.let(viewModel::isSongLikeLoading) == true,
+                        likePrompt = uiState.likePrompt,
                         onToggle = viewModel::togglePlayback,
                         onNext = viewModel::next,
                         onPrevious = viewModel::previous,
                         onPlayQueueIndex = viewModel::playQueueIndex,
                         onSeek = viewModel::seekTo,
                         onToggleLike = viewModel::toggleSongLike,
+                        onLikePromptAddToPlaylist = viewModel::openAddToPlaylistChooser,
+                        onDismissLikePrompt = viewModel::dismissLikePrompt,
                         onPlayerCommentSortChange = viewModel::selectPlayerCommentSort,
                         onRefreshPlayerComments = viewModel::refreshPlayerComments
                     )
                 }
             }
 
+            uiState.playlistChooserSong?.let { song ->
+                ModalBottomSheet(
+                    onDismissRequest = viewModel::closeAddToPlaylistChooser,
+                    sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+                    containerColor = if (resolvedDark) Color(0xFF111111) else Color(0xFFF7F7F8),
+                    scrimColor = Color.Black.copy(alpha = 0.36f),
+                    dragHandle = null
+                ) {
+                    AddToPlaylistSheet(
+                        song = song,
+                        playlists = uiState.userPlaylists.filter { playlist ->
+                            playlist.kind == PlaylistKind.UserPlaylist &&
+                                playlist.title != "我喜欢的音乐"
+                        },
+                        dark = resolvedDark,
+                        isLoading = viewModel::isPlaylistAddLoading,
+                        onPlaylistClick = viewModel::addPlaylistChooserSongToPlaylist
+                    )
+                }
+            }
+
     }
 }
-

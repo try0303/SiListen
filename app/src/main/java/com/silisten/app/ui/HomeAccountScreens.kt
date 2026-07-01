@@ -72,6 +72,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -81,18 +83,19 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material.icons.automirrored.rounded.Comment
-import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AccountCircle
 import androidx.compose.material.icons.rounded.Album
 import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.LibraryMusic
+import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.Podcasts
@@ -110,7 +113,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
@@ -118,7 +120,6 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -138,9 +139,12 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -165,6 +169,7 @@ import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.composed
 import androidx.compose.ui.text.SpanStyle
@@ -205,6 +210,7 @@ import com.silisten.app.LyricDisplayMode
 import com.silisten.app.PlaybackSettingsState
 import com.silisten.app.PlayerSheetPanel
 import com.silisten.app.QrLoginUiState
+import com.silisten.app.SearchResultKind
 import com.silisten.app.SettingsRoute
 import com.silisten.app.SiListenUiState
 import com.silisten.app.SiListenViewModel
@@ -219,6 +225,7 @@ import com.silisten.app.data.model.MusicPlaylist
 import com.silisten.app.data.model.PlaybackQuality
 import com.silisten.app.data.model.PlaylistComment
 import com.silisten.app.data.model.PlaylistCommentSort
+import com.silisten.app.data.model.PlaylistKind
 import com.silisten.app.data.model.PlaylistRoute
 import com.silisten.app.data.model.Song
 import com.silisten.app.playback.PlaybackState
@@ -242,6 +249,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.android.awaitFrame
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
@@ -263,6 +271,7 @@ fun HomeScreen(
     val listState = rememberLazyListState()
     val density = LocalDensity.current
     val isRefreshing = uiState.isLoading || uiState.isLibraryLoading
+    var actionSong by remember { mutableStateOf<Song?>(null) }
     val isAtTop by remember {
         derivedStateOf {
             listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
@@ -357,7 +366,8 @@ fun HomeScreen(
                     liked = viewModel.isSongLiked(song),
                     likeLoading = viewModel.isSongLikeLoading(song),
                     onClick = { viewModel.playSong(song) },
-                    onLikeClick = if (song.sourceId == "netease") ({ viewModel.toggleSongLike(song) }) else null
+                    onLikeClick = if (song.sourceId == "netease") ({ viewModel.toggleSongLike(song) }) else null,
+                    onMoreClick = { actionSong = song }
                 )
             }
         }
@@ -387,93 +397,759 @@ fun HomeScreen(
             }
         }
     }
+    actionSong?.let { song ->
+        SongActionSheetModal(
+            song = song,
+            dark = dark,
+            onDismiss = { actionSong = null },
+            onPlayNext = {
+                actionSong = null
+                viewModel.playSongNext(song)
+            },
+            onAddToPlaylist = {
+                actionSong = null
+                viewModel.openAddToPlaylistChooser(song)
+            },
+            onShowComments = {
+                actionSong = null
+                viewModel.playSongAndOpenComments(song)
+            }
+        )
+    }
 }
 
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun SearchScreen(
     uiState: SiListenUiState,
     viewModel: SiListenViewModel,
-    padding: PaddingValues
+    padding: PaddingValues,
+    autoFocus: Boolean = false,
+    onClose: (() -> Unit)? = null,
+    onOpenPlaylist: ((MusicPlaylist) -> Unit)? = null
 ) {
     val dark = uiState.themeSettings.resolveDarkTheme()
-    val mutedText = if (dark) Color(0xFFB8C1B9) else Color(0xFF5F6368)
-    val cardColor = if (dark) Color.White.copy(alpha = 0.08f) else Color.White
-    LazyColumn(
+    val searchFocusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val tabs = SearchResultTab.entries
+    val pagerState = rememberPagerState(pageCount = { tabs.size })
+    val scope = rememberCoroutineScope()
+    val songsListState = rememberLazyListState()
+    val playlistsListState = rememberLazyListState()
+    val albumsListState = rememberLazyListState()
+    val artistsListState = rememberLazyListState()
+    val selectedTab = tabs[pagerState.currentPage.coerceIn(0, tabs.lastIndex)]
+    val selectedListState = when (selectedTab) {
+        SearchResultTab.Songs -> songsListState
+        SearchResultTab.Playlists -> playlistsListState
+        SearchResultTab.Albums -> albumsListState
+        SearchResultTab.Artists -> artistsListState
+    }
+    var actionSong by remember { mutableStateOf<Song?>(null) }
+    var dismissDragOffsetPx by remember { mutableFloatStateOf(0f) }
+    val density = LocalDensity.current
+    val dismissThresholdPx = with(density) { 128.dp.toPx() }
+    val dragSlopPx = with(density) { 12.dp.toPx() }
+    val query = uiState.searchQuery.trim()
+    val songs = uiState.searchResults
+    val playlists = uiState.searchPlaylists
+    val albumResults = uiState.searchAlbums
+    val artistResults = uiState.searchArtists
+    val hasAnyResults = songs.isNotEmpty() ||
+        playlists.isNotEmpty() ||
+        albumResults.isNotEmpty() ||
+        artistResults.isNotEmpty()
+    val selectedHasMore = when (selectedTab) {
+        SearchResultTab.Songs -> uiState.searchHasMoreSongs
+        SearchResultTab.Playlists -> uiState.searchHasMorePlaylists
+        SearchResultTab.Albums -> uiState.searchHasMoreAlbums
+        SearchResultTab.Artists -> uiState.searchHasMoreArtists
+    }
+    val selectedCount = when (selectedTab) {
+        SearchResultTab.Songs -> songs.size
+        SearchResultTab.Playlists -> playlists.size
+        SearchResultTab.Albums -> albumResults.size
+        SearchResultTab.Artists -> artistResults.size
+    }
+    val openPlaylistFromSearch = onOpenPlaylist ?: { playlist: MusicPlaylist ->
+        onClose?.invoke()
+        viewModel.openPlaylist(playlist)
+    }
+    LaunchedEffect(autoFocus) {
+        if (autoFocus) {
+            delay(220)
+            searchFocusRequester.requestFocus()
+            keyboardController?.show()
+        }
+    }
+    LaunchedEffect(query) {
+        if (query.isBlank()) {
+            pagerState.scrollToPage(0)
+        }
+        songsListState.scrollToItem(0)
+        playlistsListState.scrollToItem(0)
+        albumsListState.scrollToItem(0)
+        artistsListState.scrollToItem(0)
+    }
+    LaunchedEffect(
+        selectedListState,
+        selectedTab,
+        query,
+        selectedCount,
+        selectedHasMore,
+        uiState.isSearching,
+        uiState.isLoadingMoreSearch
+    ) {
+        snapshotFlow {
+            val layoutInfo = selectedListState.layoutInfo
+            val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            layoutInfo.totalItemsCount > 0 && lastVisible >= layoutInfo.totalItemsCount - 4
+        }
+            .distinctUntilChanged()
+            .filter { it }
+            .collectLatest {
+                if (query.isNotBlank() && selectedHasMore && !uiState.isSearching && !uiState.isLoadingMoreSearch) {
+                    viewModel.loadMoreSearchResults(selectedTab.toKind())
+                }
+            }
+    }
+    Column(
         modifier = Modifier
             .fillMaxSize()
-            .statusBarsPadding(),
-        contentPadding = PaddingValues(
-            start = 18.dp,
-            end = 18.dp,
-            top = 18.dp,
-            bottom = 156.dp
-        ),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+            .statusBarsPadding()
+            .graphicsLayer {
+                translationY = dismissDragOffsetPx
+                alpha = 1f - (dismissDragOffsetPx / (dismissThresholdPx * 2f)).coerceIn(0f, 0.18f)
+            }
+            .pointerInput(onClose, selectedTab, selectedListState) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    var pointerId = down.id
+                    var totalX = 0f
+                    var totalY = 0f
+                    var isDismissDrag = false
+                    var passedSlop = false
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == pointerId }
+                            ?: event.changes.firstOrNull()?.also { pointerId = it.id }
+                            ?: break
+                        if (change.changedToUpIgnoreConsumed()) break
+                        val delta = change.positionChange()
+                        totalX += delta.x
+                        totalY += delta.y
+                        val listAtTop = selectedListState.firstVisibleItemIndex == 0 &&
+                            selectedListState.firstVisibleItemScrollOffset == 0
+                        if (!passedSlop && abs(totalY) > dragSlopPx && abs(totalY) > abs(totalX) * 1.2f) {
+                            passedSlop = true
+                            isDismissDrag = onClose != null && listAtTop && totalY > 0f
+                        }
+                        if (isDismissDrag) {
+                            dismissDragOffsetPx = (dismissDragOffsetPx + delta.y).coerceAtLeast(0f)
+                            change.consume()
+                        }
+                    }
+                    if (isDismissDrag && dismissDragOffsetPx >= dismissThresholdPx) {
+                        onClose?.invoke()
+                    }
+                    dismissDragOffsetPx = 0f
+                }
+            }
+            .padding(start = 18.dp, end = 18.dp, top = 12.dp)
     ) {
-        item {
-            PageHeroCard(
-                title = "搜索",
-                subtitle = "歌曲、歌手、专辑和歌单入口都会从这里收进同一套搜索体验。",
-                dark = dark,
-                trailing = {
-                    SearchFloatingGlyph(dark = dark)
-                }
+        SearchPageHeader(
+            dark = dark,
+            onClose = onClose
+        )
+        Spacer(Modifier.height(16.dp))
+        IosSearchField(
+            value = uiState.searchQuery,
+            onValueChange = viewModel::updateSearchQuery,
+            dark = dark,
+            loading = uiState.isSearching,
+            modifier = Modifier.focusRequester(searchFocusRequester)
+        )
+        Spacer(Modifier.height(16.dp))
+        if (query.isBlank() && !hasAnyResults) {
+            SearchEmptyHint(dark = dark)
+        } else {
+            SearchCategoryTabs(
+                selected = selectedTab,
+                onSelect = { tab ->
+                    scope.launch {
+                        pagerState.animateScrollToPage(tabs.indexOf(tab).coerceAtLeast(0))
+                    }
+                },
+                dark = dark
             )
-        }
-        item {
-            Surface(
-                color = cardColor,
-                border = BorderStroke(1.dp, if (dark) Color.White.copy(alpha = 0.12f) else Color(0xFFE7E7EA)),
-                shape = RoundedCornerShape(24.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    modifier = Modifier.padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    OutlinedTextField(
-                        value = uiState.searchQuery,
-                        onValueChange = viewModel::updateSearchQuery,
-                        modifier = Modifier.weight(1f),
-                        singleLine = true,
-                        placeholder = { Text("歌曲、歌手或专辑") },
-                        leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
-                        shape = RoundedCornerShape(16.dp)
-                    )
-                    Spacer(Modifier.width(10.dp))
-                        SearchActionButton(
-                            dark = dark,
-                            loading = uiState.isSearching,
-                            onClick = viewModel::runSearch
-                        )
+            Spacer(Modifier.height(10.dp))
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            ) { page ->
+                when (tabs[page]) {
+                    SearchResultTab.Songs -> SearchResultsPage(
+                        listState = songsListState,
+                        padding = padding,
+                        dark = dark,
+                        isSearching = uiState.isSearching,
+                        isLoadingMore = uiState.isLoadingMoreSearch,
+                        hasMore = uiState.searchHasMoreSongs,
+                        loadingText = "继续加载单曲..."
+                    ) {
+                        if (uiState.isSearching && songs.isEmpty()) {
+                            item { SearchLoadingRow(dark = dark) }
+                        } else if (songs.isEmpty()) {
+                            item { SearchResultEmptyRow("没有找到单曲", dark) }
+                        } else {
+                            itemsIndexed(songs, key = { _, song -> song.id }) { index, song ->
+                                SearchSongResultRow(
+                                    index = index + 1,
+                                    song = song,
+                                    dark = dark,
+                                    liked = viewModel.isSongLiked(song),
+                                    likeLoading = viewModel.isSongLikeLoading(song),
+                                    onClick = { viewModel.playSong(song) },
+                                    onLikeClick = if (song.sourceId == "netease") ({ viewModel.toggleSongLike(song) }) else null,
+                                    onMoreClick = { actionSong = song }
+                                )
+                            }
+                        }
+                    }
+                    SearchResultTab.Playlists -> SearchResultsPage(
+                        listState = playlistsListState,
+                        padding = padding,
+                        dark = dark,
+                        isLoadingMore = uiState.isLoadingMoreSearch,
+                        hasMore = uiState.searchHasMorePlaylists,
+                        loadingText = "继续加载歌单..."
+                    ) {
+                        if (playlists.isEmpty()) {
+                            item { SearchResultEmptyRow("没有找到歌单", dark) }
+                        } else {
+                            items(playlists, key = { it.id }) { playlist ->
+                                SearchCollectionResultRow(
+                                    playlist = playlist,
+                                    dark = dark,
+                                    subtitle = playlist.subtitle.ifBlank { "${playlist.songs.size} 单曲" },
+                                    artworkShape = CircleShape,
+                                    fallbackIcon = Icons.Rounded.LibraryMusic,
+                                    onClick = { openPlaylistFromSearch(playlist) }
+                                )
+                            }
+                        }
+                    }
+                    SearchResultTab.Albums -> SearchResultsPage(
+                        listState = albumsListState,
+                        padding = padding,
+                        dark = dark,
+                        isLoadingMore = uiState.isLoadingMoreSearch,
+                        hasMore = uiState.searchHasMoreAlbums,
+                        loadingText = "继续加载专辑..."
+                    ) {
+                        if (albumResults.isEmpty()) {
+                            item { SearchResultEmptyRow("没有找到专辑", dark) }
+                        } else {
+                            items(albumResults, key = { it.id }) { album ->
+                                SearchCollectionResultRow(
+                                    playlist = album,
+                                    dark = dark,
+                                    subtitle = album.subtitle,
+                                    artworkShape = RoundedCornerShape(14.dp),
+                                    fallbackIcon = Icons.Rounded.Album,
+                                    onClick = { openPlaylistFromSearch(album) }
+                                )
+                            }
+                        }
+                    }
+                    SearchResultTab.Artists -> SearchResultsPage(
+                        listState = artistsListState,
+                        padding = padding,
+                        dark = dark,
+                        isLoadingMore = uiState.isLoadingMoreSearch,
+                        hasMore = uiState.searchHasMoreArtists,
+                        loadingText = "继续加载歌手..."
+                    ) {
+                        if (artistResults.isEmpty()) {
+                            item { SearchResultEmptyRow("没有找到歌手", dark) }
+                        } else {
+                            items(artistResults, key = { it.id }) { artist ->
+                                SearchCollectionResultRow(
+                                    playlist = artist,
+                                    dark = dark,
+                                    subtitle = artist.subtitle,
+                                    artworkShape = CircleShape,
+                                    fallbackIcon = Icons.Rounded.AccountCircle,
+                                    onClick = { openPlaylistFromSearch(artist) }
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
-        item {
-            if (uiState.isSearching) {
-                StatusMessageCard(
-                    text = "正在搜索网易云...",
-                    dark = dark
-                )
+    }
+    actionSong?.let { song ->
+        SongActionSheetModal(
+            song = song,
+            dark = dark,
+            onDismiss = { actionSong = null },
+            onPlayNext = {
+                actionSong = null
+                viewModel.playSongNext(song)
+            },
+            onAddToPlaylist = {
+                actionSong = null
+                viewModel.openAddToPlaylistChooser(song)
+            },
+            onShowComments = {
+                actionSong = null
+                onClose?.invoke()
+                viewModel.playSongAndOpenComments(song)
             }
+        )
+    }
+}
+
+@Composable
+private fun SearchResultsPage(
+    listState: LazyListState,
+    padding: PaddingValues,
+    dark: Boolean,
+    isSearching: Boolean = false,
+    isLoadingMore: Boolean,
+    hasMore: Boolean,
+    loadingText: String,
+    content: LazyListScope.() -> Unit
+) {
+    LazyColumn(
+        state = listState,
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(
+            bottom = padding.calculateBottomPadding().coerceAtLeast(156.dp)
+        ),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        content()
+        if (!isSearching && (hasMore || isLoadingMore)) {
+            item { SearchLoadingRow(dark = dark, text = loadingText) }
         }
-        items(uiState.searchResults) { song ->
-            Surface(
-                color = cardColor,
-                border = BorderStroke(1.dp, if (dark) Color.White.copy(alpha = 0.10f) else Color(0xFFECECEF)),
-                shape = RoundedCornerShape(20.dp),
-                modifier = Modifier.fillMaxWidth()
+    }
+}
+
+private enum class SearchResultTab(val label: String) {
+    Songs("单曲"),
+    Playlists("歌单"),
+    Albums("专辑"),
+    Artists("歌手")
+}
+
+private fun SearchResultTab.toKind(): SearchResultKind = when (this) {
+    SearchResultTab.Songs -> SearchResultKind.Songs
+    SearchResultTab.Playlists -> SearchResultKind.Playlists
+    SearchResultTab.Albums -> SearchResultKind.Albums
+    SearchResultTab.Artists -> SearchResultKind.Artists
+}
+
+@Composable
+private fun SearchPageHeader(
+    dark: Boolean,
+    onClose: (() -> Unit)?
+) {
+    val titleColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(50.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "搜索",
+            color = titleColor,
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Black,
+            modifier = Modifier.weight(1f)
+        )
+        if (onClose != null) {
+            IconButton(
+                onClick = onClose,
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(if (dark) Color.White.copy(alpha = 0.08f) else Color.Black.copy(alpha = 0.05f))
             ) {
-                SongRow(
-                    song = song,
-                    liked = viewModel.isSongLiked(song),
-                    likeLoading = viewModel.isSongLikeLoading(song),
-                    onClick = { viewModel.playSong(song) },
-                    onLikeClick = if (song.sourceId == "netease") ({ viewModel.toggleSongLike(song) }) else null
+                Icon(
+                    Icons.Rounded.Close,
+                    contentDescription = "关闭搜索",
+                    tint = titleColor,
+                    modifier = Modifier.size(25.dp)
                 )
             }
         }
     }
+}
+
+@Composable
+private fun IosSearchField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    dark: Boolean,
+    loading: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val contentColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF151515)
+    val mutedText = if (dark) Color.White.copy(alpha = 0.48f) else Color(0xFF7B7D82)
+    Surface(
+        color = if (dark) Color.White.copy(alpha = 0.10f) else Color.White.copy(alpha = 0.78f),
+        border = BorderStroke(1.dp, if (dark) Color.White.copy(alpha = 0.10f) else Color.White.copy(alpha = 0.92f)),
+        shape = RoundedCornerShape(999.dp),
+        shadowElevation = if (dark) 0.dp else 16.dp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(62.dp)
+    ) {
+        BasicTextField(
+            value = value,
+            onValueChange = onValueChange,
+            singleLine = true,
+            textStyle = MaterialTheme.typography.titleLarge.copy(
+                color = contentColor,
+                fontWeight = FontWeight.Medium
+            ),
+            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+            modifier = modifier.fillMaxSize(),
+            decorationBox = { innerTextField ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(start = 20.dp, end = 18.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Rounded.Search,
+                        contentDescription = null,
+                        tint = contentColor.copy(alpha = 0.84f),
+                        modifier = Modifier.size(29.dp)
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                        if (value.isBlank()) {
+                            Text(
+                                text = "歌曲、歌手、专辑或歌单",
+                                color = mutedText,
+                                style = MaterialTheme.typography.titleMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        innerTextField()
+                    }
+                    if (loading) {
+                        Spacer(Modifier.width(12.dp))
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun SearchCategoryTabs(
+    selected: SearchResultTab,
+    onSelect: (SearchResultTab) -> Unit,
+    dark: Boolean
+) {
+    val accent = MaterialTheme.colorScheme.primary
+    val normal = if (dark) Color.White.copy(alpha = 0.68f) else Color(0xFF4B4D52)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        SearchResultTab.entries.forEach { tab ->
+            val isSelected = tab == selected
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .noRippleClick(shape = RoundedCornerShape(16.dp)) { onSelect(tab) }
+                    .padding(vertical = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = tab.label,
+                    color = if (isSelected) accent else normal,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = if (isSelected) FontWeight.Black else FontWeight.Bold
+                )
+                Spacer(Modifier.height(8.dp))
+                Box(
+                    modifier = Modifier
+                        .width(if (isSelected) 28.dp else 0.dp)
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(if (isSelected) accent else Color.Transparent)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SearchSongResultRow(
+    index: Int,
+    song: Song,
+    dark: Boolean,
+    liked: Boolean,
+    likeLoading: Boolean,
+    onClick: () -> Unit,
+    onLikeClick: (() -> Unit)?,
+    onMoreClick: () -> Unit
+) {
+    val titleColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
+    val mutedText = if (dark) Color.White.copy(alpha = 0.54f) else Color(0xFF676A70)
+    val heartTint by animateColorAsState(
+        targetValue = if (liked) Color(0xFFFF5C7C) else mutedText,
+        animationSpec = spring(dampingRatio = 0.72f, stiffness = 520f),
+        label = "search-song-heart"
+    )
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .noRippleClick(shape = RoundedCornerShape(18.dp), onClick = onClick)
+            .padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = index.toString(),
+            color = titleColor,
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.width(38.dp)
+        )
+        AsyncImage(
+            model = song.coverUrl,
+            contentDescription = song.title,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .size(54.dp)
+                .clip(RoundedCornerShape(13.dp))
+                .background(Color(0xFF252525))
+        )
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = song.title,
+                color = titleColor,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Black,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(3.dp))
+            Text(
+                text = song.artist,
+                color = mutedText,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        if (onLikeClick != null) {
+            Box(
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .noRippleClick(shape = CircleShape, onClick = onLikeClick),
+                contentAlignment = Alignment.Center
+            ) {
+                if (likeLoading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(15.dp),
+                        strokeWidth = 1.8.dp,
+                        color = heartTint
+                    )
+                } else {
+                    Icon(
+                        Icons.Rounded.Favorite,
+                        contentDescription = "喜欢",
+                        tint = heartTint,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+        }
+        IconButton(
+            onClick = onMoreClick,
+            modifier = Modifier.size(42.dp)
+        ) {
+            Icon(
+                Icons.Rounded.MoreVert,
+                contentDescription = "更多",
+                tint = mutedText,
+                modifier = Modifier.size(26.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun SearchCollectionResultRow(
+    playlist: MusicPlaylist,
+    dark: Boolean,
+    subtitle: String,
+    artworkShape: Shape,
+    fallbackIcon: ImageVector,
+    onClick: () -> Unit
+) {
+    val titleColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
+    val mutedText = if (dark) Color.White.copy(alpha = 0.54f) else Color(0xFF676A70)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .noRippleClick(shape = RoundedCornerShape(18.dp), onClick = onClick)
+            .padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        SearchArtwork(
+            url = playlist.coverUrl,
+            title = playlist.title,
+            shape = artworkShape,
+            fallbackIcon = fallbackIcon
+        )
+        Spacer(Modifier.width(16.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = playlist.title,
+                color = titleColor,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Black,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(3.dp))
+            Text(
+                text = subtitle,
+                color = mutedText,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Icon(
+            Icons.Rounded.ChevronRight,
+            contentDescription = null,
+            tint = mutedText,
+            modifier = Modifier.size(24.dp)
+        )
+    }
+}
+
+@Composable
+private fun SearchArtwork(
+    url: String,
+    title: String,
+    shape: Shape,
+    fallbackIcon: ImageVector
+) {
+    Box(
+        modifier = Modifier
+            .size(58.dp)
+            .clip(shape)
+            .background(Color(0xFF2A2A2A)),
+        contentAlignment = Alignment.Center
+    ) {
+        if (url.isNotBlank()) {
+            AsyncImage(
+                model = url,
+                contentDescription = title,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Icon(
+                fallbackIcon,
+                contentDescription = null,
+                tint = Color.White.copy(alpha = 0.72f),
+                modifier = Modifier.size(28.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun SearchEmptyHint(dark: Boolean) {
+    val mutedText = if (dark) Color.White.copy(alpha = 0.54f) else Color(0xFF676A70)
+    Surface(
+        color = if (dark) Color.White.copy(alpha = 0.07f) else Color.White.copy(alpha = 0.68f),
+        border = BorderStroke(1.dp, if (dark) Color.White.copy(alpha = 0.08f) else Color.White.copy(alpha = 0.78f)),
+        shape = RoundedCornerShape(26.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Text(
+            text = "输入关键词后，会按单曲、歌单、专辑、歌手分类展示。",
+            color = mutedText,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 16.dp)
+        )
+    }
+}
+
+@Composable
+private fun SearchLoadingRow(
+    dark: Boolean,
+    text: String = "正在搜索..."
+) {
+    val mutedText = if (dark) Color.White.copy(alpha = 0.60f) else Color(0xFF676A70)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 20.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        CircularProgressIndicator(
+            modifier = Modifier.size(18.dp),
+            strokeWidth = 2.dp,
+            color = MaterialTheme.colorScheme.primary
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(
+            text = text,
+            color = mutedText,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+@Composable
+private fun SearchResultEmptyRow(
+    text: String,
+    dark: Boolean
+) {
+    val mutedText = if (dark) Color.White.copy(alpha = 0.54f) else Color(0xFF676A70)
+    Text(
+        text = text,
+        color = mutedText,
+        style = MaterialTheme.typography.bodyMedium,
+        fontWeight = FontWeight.Bold,
+        textAlign = TextAlign.Center,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 28.dp)
+    )
 }
 
 @Composable
@@ -569,16 +1245,32 @@ fun SourcesScreen(
 private enum class AccountLoginMethod { Qr, Sms }
 
 @Composable
-fun AccountScreen(viewModel: SiListenViewModel, padding: PaddingValues) {
+fun AccountScreen(
+    viewModel: SiListenViewModel,
+    padding: PaddingValues,
+    onSearch: () -> Unit = { viewModel.selectTab(AppTab.Search) }
+) {
     val state = viewModel.accountState
     val uiState = viewModel.uiState
     val user = state.loginState.user
     val context = LocalContext.current
-    var loginMethod by remember { mutableStateOf(AccountLoginMethod.Qr) }
+    var loginMethod by remember { mutableStateOf(AccountLoginMethod.Sms) }
     val dark = uiState.themeSettings.resolveDarkTheme()
     val mutedText = if (dark) Color(0xFFB8C1B9) else Color(0xFF5F6368)
     val warningText = if (dark) Color(0xFFFFD166) else Color(0xFF8A5A00)
     val cardColor = if (dark) Color.White.copy(alpha = 0.08f) else Color.White
+    val recentPlayedPlaylist = remember(uiState.recentPlayedSongs) {
+        uiState.recentPlayedSongs.takeIf { it.isNotEmpty() }?.let { songs ->
+            MusicPlaylist(
+                id = "local-recent-played",
+                title = "最近播放",
+                subtitle = "${songs.size} 首最近听过的歌曲",
+                coverUrl = songs.firstOrNull()?.coverUrl.orEmpty(),
+                songs = songs,
+                kind = PlaylistKind.Playlist
+            )
+        }
+    }
     val audioPermission = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO else Manifest.permission.READ_EXTERNAL_STORAGE
     val localPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         viewModel.scanLocalMusic()
@@ -634,7 +1326,7 @@ fun AccountScreen(viewModel: SiListenViewModel, padding: PaddingValues) {
                     loading = uiState.isLibraryLoading,
                     dark = dark,
                     accent = MaterialTheme.colorScheme.primary,
-                    onSearch = { viewModel.selectTab(AppTab.Search) }
+                    onSearch = onSearch
                 )
             }
             item {
@@ -647,29 +1339,19 @@ fun AccountScreen(viewModel: SiListenViewModel, padding: PaddingValues) {
                 )
             }
             item {
-                SectionBulletTitle("喜欢的音乐", dark = dark)
+                SectionBulletTitle("我的歌单", dark = dark)
             }
-            item {
-                val liked = uiState.likedSongs
-                if (liked != null) {
+            recentPlayedPlaylist?.let { playlist ->
+                item(key = "recent-played") {
                     AccountLibraryRow(
-                        playlist = liked,
-                        subtitle = if (liked.songs.isEmpty()) liked.subtitle else "${liked.songs.size} 首",
+                        playlist = playlist,
+                        subtitle = playlist.subtitle,
                         dark = dark,
-                        onClick = { viewModel.openPlaylist(liked) }
-                    )
-                } else {
-                    AccountPlaceholderRow(
-                        title = "喜欢的音乐",
-                        subtitle = if (uiState.isLibraryLoading) "正在同步喜欢列表..." else "点击刷新后读取喜欢列表",
-                        dark = dark
+                        onClick = { viewModel.openPlaylist(playlist) }
                     )
                 }
             }
-            item {
-                SectionBulletTitle("我的歌单", dark = dark)
-            }
-            if (uiState.userPlaylists.isEmpty()) {
+            if (uiState.userPlaylists.isEmpty() && recentPlayedPlaylist == null) {
                 item {
                     AccountPlaceholderRow(
                         title = "还没有读到歌单",
@@ -719,42 +1401,54 @@ fun AccountScreen(viewModel: SiListenViewModel, padding: PaddingValues) {
             }
         } else {
             item {
-                AccountLoginHero(
+                AccountLoginHeader(
                     dark = dark,
                     accent = MaterialTheme.colorScheme.primary,
-                    accentOn = MaterialTheme.colorScheme.onPrimary,
-                    statusText = state.loginState.message,
-                    warningText = warningText,
                     onOpenNeteaseApp = { openNeteaseCloudMusic(context) }
                 )
             }
             item {
-                LoginMethodSelector(
-                    selected = loginMethod,
+                SmsLoginCard(
+                    phone = state.phone,
+                    captcha = state.captcha,
+                    sendingCode = state.sendingCode,
+                    loggingIn = state.loggingIn,
+                    cooldownSeconds = state.smsCooldownSeconds,
                     dark = dark,
-                    onSelect = { loginMethod = it }
+                    mutedText = mutedText,
+                    onPhoneChange = viewModel::updatePhone,
+                    onCaptchaChange = viewModel::updateCaptcha,
+                    onSendCode = viewModel::sendSmsCode,
+                    onLogin = viewModel::loginNetease
                 )
             }
             item {
-                when (loginMethod) {
-                    AccountLoginMethod.Qr -> QrLoginCard(
+                LoginStatusText(
+                    text = state.loginState.message,
+                    color = warningText,
+                    dark = dark
+                )
+            }
+            item {
+                QrLoginDisclosure(
+                    expanded = loginMethod == AccountLoginMethod.Qr,
+                    dark = dark,
+                    onToggle = {
+                        loginMethod = if (loginMethod == AccountLoginMethod.Qr) {
+                            AccountLoginMethod.Sms
+                        } else {
+                            AccountLoginMethod.Qr
+                        }
+                    }
+                )
+            }
+            item {
+                AnimatedVisibility(visible = loginMethod == AccountLoginMethod.Qr) {
+                    QrLoginCard(
                         state = state.qrLogin,
                         dark = dark,
                         onCreate = viewModel::createQrLogin,
                         onOpenNeteaseApp = { openNeteaseCloudMusic(context) }
-                    )
-                    AccountLoginMethod.Sms -> SmsLoginCard(
-                        phone = state.phone,
-                        captcha = state.captcha,
-                        sendingCode = state.sendingCode,
-                        loggingIn = state.loggingIn,
-                        cooldownSeconds = state.smsCooldownSeconds,
-                        dark = dark,
-                        mutedText = mutedText,
-                        onPhoneChange = viewModel::updatePhone,
-                        onCaptchaChange = viewModel::updateCaptcha,
-                        onSendCode = viewModel::sendSmsCode,
-                        onLogin = viewModel::loginNetease
                     )
                 }
             }
@@ -914,134 +1608,142 @@ private fun AccountSettingsTile(
 }
 
 @Composable
-private fun AccountLoginHero(
+private fun AccountLoginHeader(
     dark: Boolean,
     accent: Color,
-    accentOn: Color,
-    statusText: String,
-    warningText: Color,
     onOpenNeteaseApp: () -> Unit
 ) {
-    val cardColor = if (dark) Color.White.copy(alpha = 0.10f) else Color.White
     val titleColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
-    val secondaryText = if (dark) Color(0xFFB8C1B9) else Color(0xFF5F6368)
-    Surface(
-        color = cardColor,
-        border = BorderStroke(1.dp, if (dark) Color.White.copy(alpha = 0.14f) else Color(0xFFE7E7EA)),
-        shape = RoundedCornerShape(30.dp),
-        modifier = Modifier.fillMaxWidth()
+    val mutedText = if (dark) Color(0xFFB8C1B9) else Color(0xFF5F6368)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 4.dp, bottom = 2.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Column(
-            modifier = Modifier.padding(22.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp)
+        Box(
+            modifier = Modifier
+                .size(54.dp)
+                .clip(RoundedCornerShape(17.dp))
+                .background(
+                    Brush.linearGradient(
+                        listOf(
+                            accent,
+                            accent.copy(alpha = 0.72f)
+                        )
+                    )
+                ),
+            contentAlignment = Alignment.Center
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(62.dp)
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(
-                            Brush.linearGradient(
-                                listOf(
-                                    accent,
-                                    accent.copy(alpha = 0.72f)
-                                )
-                            )
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(Icons.Rounded.MusicNote, contentDescription = null, tint = accentOn, modifier = Modifier.size(32.dp))
-                }
-                Spacer(Modifier.width(14.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        text = "网易云账号登录",
-                        color = titleColor,
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Black
-                    )
-                    Text(
-                        text = "登录后直接同步每日推荐、FM、云盘和个人歌单。",
-                        color = secondaryText,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-            }
-            Surface(
-                color = accent.copy(alpha = if (dark) 0.16f else 0.10f),
-                shape = RoundedCornerShape(24.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
-                    Text(
-                        text = "支持二维码和短信验证码两种方式",
-                        color = if (dark) Color.White else Color(0xFF1B1B1F),
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        text = "推荐先用短信验证码；如果二维码被网易云限制，可以直接切换登录方式。",
-                        color = secondaryText,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-            }
-            Text(
-                text = statusText,
-                color = warningText,
-                style = MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.SemiBold
-            )
-            PrimaryActionButton(
-                text = "打开网易云音乐 App",
-                onClick = onOpenNeteaseApp,
-                containerColor = accent,
-                contentColor = accentOn,
-                modifier = Modifier.fillMaxWidth()
+            Icon(
+                Icons.Rounded.MusicNote,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onPrimary,
+                modifier = Modifier.size(28.dp)
             )
         }
+        Spacer(Modifier.height(14.dp))
+        Text(
+            text = "SiListen",
+            color = titleColor,
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Black
+        )
+        Text(
+            text = "登录网易云音乐，同步你的歌单和推荐",
+            color = mutedText,
+            style = MaterialTheme.typography.bodyMedium,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(top = 4.dp)
+        )
+        Text(
+            text = "打开网易云音乐 App",
+            color = accent,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.Black,
+            modifier = Modifier
+                .padding(top = 12.dp)
+                .noRippleClick(shape = RoundedCornerShape(999.dp), onClick = onOpenNeteaseApp)
+                .padding(horizontal = 14.dp, vertical = 8.dp)
+        )
     }
 }
 
 @Composable
-private fun LoginMethodSelector(
-    selected: AccountLoginMethod,
-    dark: Boolean,
-    onSelect: (AccountLoginMethod) -> Unit
+private fun LoginStatusText(
+    text: String,
+    color: Color,
+    dark: Boolean
 ) {
-    Row(
+    if (text.isBlank()) return
+    val container = if (dark) Color.White.copy(alpha = 0.07f) else Color.White.copy(alpha = 0.80f)
+    Surface(
+        color = container,
+        border = BorderStroke(1.dp, if (dark) Color.White.copy(alpha = 0.10f) else Color(0xFFE9E9ED)),
+        shape = RoundedCornerShape(18.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Text(
+            text = text,
+            color = color,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
+        )
+    }
+}
+
+@Composable
+private fun QrLoginDisclosure(
+    expanded: Boolean,
+    dark: Boolean,
+    onToggle: () -> Unit
+) {
+    val titleColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
+    val mutedText = if (dark) Color(0xFFB8C1B9) else Color(0xFF6E7176)
+    Surface(
+        color = if (dark) Color.White.copy(alpha = 0.06f) else Color.White.copy(alpha = 0.82f),
+        border = BorderStroke(1.dp, if (dark) Color.White.copy(alpha = 0.10f) else Color(0xFFE9E9ED)),
+        shape = RoundedCornerShape(22.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
-            .background(if (dark) Color.White.copy(alpha = 0.08f) else Color.White.copy(alpha = 0.92f))
-            .padding(4.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp)
+            .noRippleClick(shape = RoundedCornerShape(22.dp), onClick = onToggle)
     ) {
-        listOf(
-            AccountLoginMethod.Qr to "二维码登录",
-            AccountLoginMethod.Sms to "短信验证码"
-        ).forEach { item ->
-            val isSelected = item.first == selected
-            Surface(
-                color = if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent,
-                shape = RoundedCornerShape(16.dp),
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
                 modifier = Modifier
-                    .weight(1f)
-                    .noRippleClick(shape = RoundedCornerShape(16.dp)) { onSelect(item.first) }
+                    .size(34.dp)
+                    .clip(RoundedCornerShape(11.dp))
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
+                contentAlignment = Alignment.Center
             ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 12.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = item.second,
-                        color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onBackground,
-                        fontWeight = if (isSelected) FontWeight.Black else FontWeight.SemiBold
-                    )
-                }
+                Text("QR", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Black)
             }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = if (expanded) "收起二维码登录" else "使用二维码登录",
+                    color = titleColor,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Black
+                )
+                Text(
+                    text = "如果短信不方便，可以用官方 App 扫码确认",
+                    color = mutedText,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            Icon(
+                Icons.Rounded.ChevronRight,
+                contentDescription = null,
+                tint = mutedText,
+                modifier = Modifier.graphicsLayer {
+                    rotationZ = if (expanded) 90f else 0f
+                }
+            )
         }
     }
 }
@@ -1063,13 +1765,14 @@ private fun SmsLoginCard(
     val accent = MaterialTheme.colorScheme.primary
     val accentOn = MaterialTheme.colorScheme.onPrimary
     val titleColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
+    val formContainer = if (dark) Color.White.copy(alpha = 0.09f) else Color.White.copy(alpha = 0.96f)
     Surface(
-        color = if (dark) Color.White.copy(alpha = 0.10f) else Color.White,
+        color = formContainer,
         border = if (dark) BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)) else BorderStroke(1.dp, Color(0xFFE7E7EA)),
-        shape = RoundedCornerShape(24.dp),
+        shape = RoundedCornerShape(28.dp),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text(
                 text = "手机号验证码登录",
                 color = titleColor,
@@ -1088,29 +1791,25 @@ private fun SmsLoginCard(
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
                 placeholder = { Text("手机号") },
-                shape = RoundedCornerShape(16.dp)
+                shape = RoundedCornerShape(14.dp)
             )
-            OutlinedTextField(
+            SmsCodeInput(
                 value = captcha,
-                onValueChange = onCaptchaChange,
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                placeholder = { Text("短信验证码") },
-                shape = RoundedCornerShape(16.dp)
+                dark = dark,
+                onValueChange = onCaptchaChange
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                 SecondaryActionButton(
                     text = when {
                         sendingCode -> "发送中"
-                        cooldownSeconds > 0 -> "${cooldownSeconds}s"
+                        cooldownSeconds > 0 -> "${cooldownSeconds}s 后重新获取"
                         else -> "获取验证码"
                     },
                     dark = dark,
                     onClick = onSendCode,
                     enabled = !sendingCode && cooldownSeconds == 0,
                     loading = sendingCode,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.fillMaxWidth()
                 )
                 PrimaryActionButton(
                     text = if (loggingIn) "登录中" else "登录",
@@ -1119,10 +1818,91 @@ private fun SmsLoginCard(
                     contentColor = accentOn,
                     enabled = !loggingIn && !sendingCode,
                     loading = loggingIn,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.fillMaxWidth()
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun SmsCodeInput(
+    value: String,
+    dark: Boolean,
+    onValueChange: (String) -> Unit
+) {
+    val minVisibleSlots = 4
+    val maxCodeLength = 6
+    val code = value.filter { it.isDigit() }.take(maxCodeLength)
+    val visibleSlots = if (code.length >= minVisibleSlots) maxCodeLength else minVisibleSlots
+    val textColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
+    val mutedText = if (dark) Color(0xFF9FA8A0) else Color(0xFF7A7D83)
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            text = "短信验证码（支持 4-6 位）",
+            color = mutedText,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold
+        )
+        BasicTextField(
+            value = code,
+            onValueChange = { next ->
+                onValueChange(next.filter { it.isDigit() }.take(maxCodeLength))
+            },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            textStyle = MaterialTheme.typography.titleLarge.copy(color = Color.Transparent),
+            cursorBrush = SolidColor(Color.Transparent),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(54.dp),
+            decorationBox = { innerTextField ->
+                Box(Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        repeat(visibleSlots) { index ->
+                            val digit = code.getOrNull(index)?.toString().orEmpty()
+                            val active = index == code.length && code.length < maxCodeLength
+                            Surface(
+                                color = if (dark) Color.White.copy(alpha = 0.07f) else Color(0xFFF8F8FA),
+                                border = BorderStroke(
+                                    width = 1.dp,
+                                    color = if (active) {
+                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.72f)
+                                    } else if (dark) {
+                                        Color.White.copy(alpha = 0.10f)
+                                    } else {
+                                        Color(0xFFE2E3E7)
+                                    }
+                                ),
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(54.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    Text(
+                                        text = digit,
+                                        color = textColor,
+                                        style = MaterialTheme.typography.titleLarge,
+                                        fontWeight = FontWeight.Black
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(1.dp)
+                            .alpha(0f)
+                    ) {
+                        innerTextField()
+                    }
+                }
+            }
+        )
     }
 }
 
@@ -1311,11 +2091,7 @@ private fun AccountLibraryRow(
                     style = MaterialTheme.typography.bodyMedium
                 )
             }
-            Column(horizontalAlignment = Alignment.End) {
-                Text("查看歌单", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(2.dp))
-                Icon(Icons.Rounded.ChevronRight, contentDescription = "查看歌单", tint = muted)
-            }
+            Icon(Icons.Rounded.ChevronRight, contentDescription = "查看歌单", tint = muted)
         }
     }
 }

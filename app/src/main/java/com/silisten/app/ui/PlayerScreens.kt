@@ -198,6 +198,7 @@ import com.kyant.backdrop.shadow.InnerShadow
 import com.kyant.backdrop.shadow.Shadow
 import com.qmdeve.liquidglass.widget.LiquidGlassView
 import com.silisten.app.AppTab
+import com.silisten.app.LikePromptState
 import com.silisten.app.LyricDisplayMode
 import com.silisten.app.PlaybackSettingsState
 import com.silisten.app.PlayerSheetPanel
@@ -726,6 +727,7 @@ private fun PlayerDetailPage(
     onPrevious: () -> Unit,
     onSeek: (Long) -> Unit,
     onToggleLike: (Song) -> Unit,
+    onArtworkClick: () -> Unit,
     artworkScale: Float,
     artworkAlpha: Float
 ) {
@@ -768,6 +770,7 @@ private fun PlayerDetailPage(
                     .shadow(40.dp, RoundedCornerShape(18.dp), clip = false)
                     .clip(RoundedCornerShape(18.dp))
                     .background(Color(0xFF252525))
+                    .noRippleClick(shape = RoundedCornerShape(18.dp), onClick = onArtworkClick)
             )
         }
         Spacer(Modifier.weight(0.06f))
@@ -903,12 +906,15 @@ fun FullPlayer(
     initialPanel: PlayerSheetPanel,
     isLiked: Boolean,
     isLikeLoading: Boolean,
+    likePrompt: LikePromptState?,
     onToggle: () -> Unit,
     onNext: () -> Unit,
     onPrevious: () -> Unit,
     onPlayQueueIndex: (Int) -> Unit,
     onSeek: (Long) -> Unit,
     onToggleLike: (Song) -> Unit,
+    onLikePromptAddToPlaylist: (Song) -> Unit,
+    onDismissLikePrompt: (String) -> Unit,
     onPlayerCommentSortChange: (PlaylistCommentSort) -> Unit,
     onRefreshPlayerComments: () -> Unit
 ) {
@@ -976,6 +982,10 @@ fun FullPlayer(
                         onPrevious = onPrevious,
                         onSeek = onSeek,
                         onToggleLike = onToggleLike,
+                        onArtworkClick = {
+                            val lyricsPage = playerPages.indexOf(PlayerPage.Lyrics).coerceAtLeast(0)
+                            pagerScope.launch { pagerState.animateScrollToPage(lyricsPage) }
+                        },
                         artworkScale = artworkScale,
                         artworkAlpha = artworkAlpha
                     )
@@ -985,10 +995,14 @@ fun FullPlayer(
                             isLoading = isLyricLoading,
                             playbackPositionMs = playback.positionMs,
                             durationMs = duration,
+                            song = song,
                             coverUrl = song?.coverUrl,
                             songTitle = song?.title,
                             songArtist = song?.artist,
+                            isLiked = isLiked,
+                            isLikeLoading = isLikeLoading,
                             onSeek = onSeek,
+                            onToggleLike = onToggleLike,
                             isPlaying = playback.isPlaying,
                             onToggle = onToggle,
                             onPrevious = onPrevious,
@@ -1032,6 +1046,76 @@ fun FullPlayer(
                     pagerScope.launch { pagerState.animateScrollToPage(index) }
                 }
             )
+        }
+        LikeAddedPrompt(
+            prompt = likePrompt,
+            accent = accent,
+            onAddToPlaylist = onLikePromptAddToPlaylist,
+            onDismiss = onDismissLikePrompt,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(top = 54.dp, start = 18.dp, end = 18.dp)
+                .zIndex(8f)
+        )
+    }
+}
+
+@Composable
+fun LikeAddedPrompt(
+    prompt: LikePromptState?,
+    accent: Color,
+    onAddToPlaylist: (Song) -> Unit,
+    onDismiss: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    LaunchedEffect(prompt?.song?.id, prompt?.message, prompt?.showAddToPlaylistAction) {
+        val songId = prompt?.song?.id ?: return@LaunchedEffect
+        delay(4200)
+        onDismiss(songId)
+    }
+    AnimatedVisibility(
+        visible = prompt != null,
+        enter = fadeIn(animationSpec = tween(160)) + scaleIn(initialScale = 0.96f),
+        exit = fadeOut(animationSpec = tween(140)) + scaleOut(targetScale = 0.96f),
+        modifier = modifier
+    ) {
+        val currentPrompt = prompt ?: return@AnimatedVisibility
+        Surface(
+            color = Color.Black.copy(alpha = 0.58f),
+            shape = RoundedCornerShape(999.dp),
+            shadowElevation = 18.dp,
+            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.12f))
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Icon(
+                    Icons.Rounded.Favorite,
+                    contentDescription = null,
+                    tint = Color(0xFFFF5C7C),
+                    modifier = Modifier.size(18.dp)
+                )
+                Text(
+                    text = currentPrompt.message,
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold
+                )
+                if (currentPrompt.showAddToPlaylistAction) {
+                    Text(
+                        text = "加入歌单 >",
+                        color = accent,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Black,
+                        modifier = Modifier.noRippleClick(shape = RoundedCornerShape(999.dp)) {
+                            onAddToPlaylist(currentPrompt.song)
+                        }
+                    )
+                }
+            }
         }
     }
 }
@@ -1634,10 +1718,14 @@ private fun GlassLyricsPanel(
     isLoading: Boolean,
     playbackPositionMs: Long,
     durationMs: Long,
+    song: Song?,
     coverUrl: String?,
     songTitle: String?,
     songArtist: String?,
+    isLiked: Boolean,
+    isLikeLoading: Boolean,
     onSeek: (Long) -> Unit,
+    onToggleLike: (Song) -> Unit,
     isPlaying: Boolean,
     onToggle: () -> Unit,
     onPrevious: () -> Unit,
@@ -1683,6 +1771,16 @@ private fun GlassLyricsPanel(
         lyricItems.indexOfLast { it.timeMs <= interpolatedMs }.coerceAtLeast(0)
     }
     val listState = rememberLazyListState()
+    val heartTint by animateColorAsState(
+        targetValue = if (isLiked) Color(0xFFFF5C7C) else Color.White.copy(alpha = 0.82f),
+        animationSpec = spring(dampingRatio = 0.72f, stiffness = 520f),
+        label = "lyrics-heart-color"
+    )
+    val heartScale by animateFloatAsState(
+        targetValue = if (isLiked) 1.1f else 1f,
+        animationSpec = spring(dampingRatio = 0.62f, stiffness = 520f),
+        label = "lyrics-heart-scale"
+    )
 
     LaunchedEffect(activeIndex, lyricItems.size) {
         if (lyricItems.isEmpty()) return@LaunchedEffect
@@ -1702,28 +1800,31 @@ private fun GlassLyricsPanel(
         Column(
             modifier = Modifier
                 .align(Alignment.TopStart)
-                .padding(start = 16.dp, top = 12.dp, end = 16.dp)
-                .zIndex(2f)
+                .padding(start = 20.dp, top = 18.dp, end = 20.dp)
+                .zIndex(3f)
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp)
             ) {
                 AsyncImage(
                     model = coverUrl,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
-                        .size(40.dp)
-                        .clip(RoundedCornerShape(10.dp))
+                        .size(46.dp)
+                        .shadow(14.dp, RoundedCornerShape(14.dp), clip = false)
+                        .clip(RoundedCornerShape(14.dp))
                 )
-                Spacer(Modifier.width(10.dp))
+                Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     MarqueeText(
                         text = songTitle.orEmpty().ifBlank { "未知歌曲" },
                         color = Color.White.copy(alpha = 0.94f),
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Black
                     )
                     MarqueeText(
                         text = songArtist.orEmpty().ifBlank { "未知歌手" },
@@ -1733,6 +1834,36 @@ private fun GlassLyricsPanel(
                     )
                 }
                 Spacer(Modifier.width(6.dp))
+                if (song?.sourceId == "netease") {
+                    IconButton(
+                        onClick = { onToggleLike(song) },
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.10f))
+                    ) {
+                        if (isLikeLoading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                strokeWidth = 1.6.dp,
+                                color = heartTint
+                            )
+                        } else {
+                            Icon(
+                                Icons.Rounded.Favorite,
+                                contentDescription = "喜欢",
+                                tint = heartTint,
+                                modifier = Modifier
+                                    .size(19.dp)
+                                    .graphicsLayer {
+                                        scaleX = heartScale
+                                        scaleY = heartScale
+                                    }
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(4.dp))
+                }
                 IconButton(
                     onClick = onPrevious,
                     modifier = Modifier.size(34.dp)
@@ -1749,7 +1880,7 @@ private fun GlassLyricsPanel(
                     modifier = Modifier
                         .size(36.dp)
                         .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.14f))
+                        .background(Color.White.copy(alpha = 0.12f))
                 ) {
                     Icon(
                         if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
@@ -1776,12 +1907,13 @@ private fun GlassLyricsPanel(
             state = listState,
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 24.dp),
+                .padding(horizontal = 24.dp)
+                .zIndex(0f),
             horizontalAlignment = Alignment.Start,
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             item(key = "apple-lyrics-top") {
-                Spacer(Modifier.height(80.dp))
+                Spacer(Modifier.height(126.dp))
             }
             itemsIndexed(
                 items = lyricItems,
@@ -1790,17 +1922,40 @@ private fun GlassLyricsPanel(
                 val isActive = index == activeIndex || lyricItems.size == 1
                 val distance = kotlin.math.abs(index - activeIndex)
                 val nextTime = lyricItems.getOrNull(index + 1)?.timeMs ?: (line.timeMs + 3_800L)
-                val karaokeProgress = if (isActive && nextTime > line.timeMs) {
-                    ((interpolatedMs - line.timeMs).toFloat() / (nextTime - line.timeMs).toFloat()).coerceIn(0f, 1f)
+                val karaokeProgress = if (isActive && line.words != null && line.words.isNotEmpty()) {
+                    val elapsed = interpolatedMs - line.timeMs
+                    if (elapsed <= 0L) 0f
+                    else {
+                        var filledChars = 0
+                        var partialFraction = 0f
+                        for (w in line.words) {
+                            val wEnd = w.offsetMs + w.durationMs
+                            if (elapsed >= wEnd) {
+                                filledChars += w.text.length
+                            } else if (elapsed > w.offsetMs) {
+                                val wordProgress = ((elapsed - w.offsetMs).toFloat() / w.durationMs.coerceAtLeast(1L).toFloat()).coerceIn(0f, 1f)
+                                partialFraction = wordProgress
+                                filledChars += (w.text.length * wordProgress).toInt()
+                                break
+                            } else {
+                                break
+                            }
+                        }
+                        val totalChars = line.text.length.coerceAtLeast(1)
+                        ((filledChars.toFloat() + partialFraction * 0.5f) / totalChars).coerceIn(0f, 1f)
+                    }
+                } else if (isActive && nextTime > line.timeMs) {
+                    val rawProgress = ((interpolatedMs - line.timeMs).toFloat() / (nextTime - line.timeMs).toFloat()).coerceIn(0f, 1f)
+                    1f - (1f - rawProgress).let { it * it }
                 } else {
                     0f
                 }
                 val targetAlpha = when {
                     isActive -> 1f
-                    distance == 1 -> 0.52f
-                    distance == 2 -> 0.26f
-                    distance == 3 -> 0.12f
-                    else -> 0.05f
+                    distance == 1 -> 0.46f
+                    distance == 2 -> 0.28f
+                    distance == 3 -> 0.16f
+                    else -> 0.08f
                 }
                 val lineAlpha by animateFloatAsState(
                     targetValue = targetAlpha,
@@ -1812,7 +1967,8 @@ private fun GlassLyricsPanel(
                     animationSpec = spring(dampingRatio = 0.76f, stiffness = 260f),
                     label = "apple-lyric-scale"
                 )
-                Box(
+                val lineClickInteraction = remember(line.timeMs, index) { MutableInteractionSource() }
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(vertical = if (isActive) 20.dp else 12.dp)
@@ -1821,11 +1977,13 @@ private fun GlassLyricsPanel(
                             scaleX = lineScale
                             scaleY = lineScale
                         }
-                        .blur(if (isActive) 0.dp else (distance.coerceAtMost(4) * 1.2f).dp)
-                        .noRippleClick(shape = RoundedCornerShape(18.dp)) {
+                        .clickable(
+                            interactionSource = lineClickInteraction,
+                            indication = null
+                        ) {
                             onSeek(line.timeMs)
                         },
-                    contentAlignment = Alignment.CenterStart
+                    horizontalAlignment = Alignment.Start
                 ) {
                     AppleMusicLyricLineText(
                         text = line.text.trim().ifBlank { " " },
@@ -1833,6 +1991,69 @@ private fun GlassLyricsPanel(
                         progress = karaokeProgress,
                         accent = accent
                     )
+                    if (distance <= 1) {
+                        line.translation?.takeIf { it.isNotBlank() }?.let { translation ->
+                            Spacer(Modifier.height(if (isActive) 8.dp else 5.dp))
+                            if (isActive) {
+                                AppleMusicLyricLineText(
+                                    text = translation,
+                                    active = true,
+                                    progress = karaokeProgress,
+                                    accent = accent,
+                                    activeTextColor = Color.White.copy(alpha = 0.76f),
+                                    unsungTextColor = Color.White.copy(alpha = 0.30f),
+                                    activeTextStyle = MaterialTheme.typography.titleMedium.copy(
+                                        fontSize = 18.sp,
+                                        lineHeight = 24.sp
+                                    ),
+                                    activeMaxLines = 3,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            } else {
+                                Text(
+                                    text = translation,
+                                    color = Color.White.copy(alpha = 0.34f),
+                                    style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 20.sp),
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        }
+                        line.romanization?.takeIf { it.isNotBlank() }?.let { romanization ->
+                            Spacer(Modifier.height(if (isActive) 4.dp else 3.dp))
+                            if (isActive) {
+                                AppleMusicLyricLineText(
+                                    text = romanization,
+                                    active = true,
+                                    progress = karaokeProgress,
+                                    accent = accent,
+                                    activeTextColor = Color.White.copy(alpha = 0.58f),
+                                    unsungTextColor = Color.White.copy(alpha = 0.22f),
+                                    activeTextStyle = MaterialTheme.typography.bodyMedium.copy(
+                                        fontSize = 14.sp,
+                                        lineHeight = 19.sp
+                                    ),
+                                    activeMaxLines = 2,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            } else {
+                                Text(
+                                    text = romanization,
+                                    color = Color.White.copy(alpha = 0.26f),
+                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                        fontSize = 12.sp,
+                                        lineHeight = 17.sp
+                                    ),
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        }
+                    }
                 }
             }
             item(key = "apple-lyrics-bottom") {
@@ -1840,17 +2061,6 @@ private fun GlassLyricsPanel(
             }
         }
 
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxWidth()
-                .height(56.dp)
-                .background(
-                    Brush.verticalGradient(
-                        listOf(Color.Black.copy(alpha = 0.52f), Color.Transparent)
-                    )
-                )
-        )
         Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -1873,7 +2083,7 @@ private fun AppleMusicLyricLineText(
     accent: Color,
     activeTextColor: Color = Color.White,
     inactiveTextColor: Color = Color.White.copy(alpha = 0.58f),
-    unsungTextColor: Color = Color.White.copy(alpha = 0.44f),
+    unsungTextColor: Color = Color.White.copy(alpha = 0.55f),
     activeTextStyle: androidx.compose.ui.text.TextStyle? = null,
     inactiveTextStyle: androidx.compose.ui.text.TextStyle? = null,
     textAlign: TextAlign = TextAlign.Start,
@@ -1929,31 +2139,48 @@ private fun AppleMusicLyricLineText(
                     val layout = textLayout ?: return@drawWithContent
                     val p = progress.coerceIn(0f, 1f)
                     if (p <= 0f || layout.lineCount == 0) return@drawWithContent
-                    val visibleEnd = (0 until layout.lineCount)
-                        .maxOf { line -> layout.getLineEnd(line, visibleEnd = true) }
-                        .coerceIn(0, text.length)
-                    if (visibleEnd <= 0) return@drawWithContent
+                    val visibleLines = (0 until layout.lineCount).mapNotNull { line ->
+                        val lineStart = layout.getLineStart(line).coerceIn(0, text.length)
+                        val lineEnd = layout.getLineEnd(line, visibleEnd = true).coerceIn(lineStart, text.length)
+                        if (lineEnd <= lineStart) {
+                            null
+                        } else {
+                            line to (lineStart to lineEnd)
+                        }
+                    }
+                    if (visibleLines.isEmpty()) return@drawWithContent
 
-                    val fillOffset = visibleEnd * p
-                    val fillBaseOffset = floor(fillOffset).toInt().coerceIn(0, visibleEnd)
-                    val fillFraction = (fillOffset - fillBaseOffset).coerceIn(0f, 1f)
-
+                    val totalVisibleChars = visibleLines.sumOf { (_, range) ->
+                        (range.second - range.first).coerceAtLeast(1)
+                    }
+                    val fillChars = if (p >= 0.98f) {
+                        totalVisibleChars.toFloat()
+                    } else {
+                        (totalVisibleChars * p).coerceIn(0f, totalVisibleChars.toFloat())
+                    }
+                    var consumedChars = 0f
                     for (line in 0 until layout.lineCount) {
-                        val lineStart = layout.getLineStart(line).coerceIn(0, visibleEnd)
-                        val lineEnd = layout.getLineEnd(line, visibleEnd = true).coerceIn(lineStart, visibleEnd)
+                        val range = visibleLines.firstOrNull { it.first == line }?.second ?: continue
+                        val lineStart = range.first
+                        val lineEnd = range.second
                         if (lineEnd <= lineStart) continue
 
                         val lineLeft = layout.getLineLeft(line).coerceIn(0f, size.width)
                         val lineRight = layout.getLineRight(line).coerceIn(lineLeft, size.width)
+                        val lineChars = (lineEnd - lineStart).coerceAtLeast(1).toFloat()
+                        val lineFill = (fillChars - consumedChars).coerceIn(0f, lineChars)
+                        consumedChars += lineChars
                         val right = when {
-                            fillOffset >= lineEnd -> lineRight
-                            fillOffset <= lineStart -> lineLeft
+                            p >= 0.98f || lineFill >= lineChars -> lineRight
+                            lineFill <= 0f -> lineLeft
                             else -> {
-                                val startOffset = fillBaseOffset.coerceIn(lineStart, lineEnd)
-                                val endOffset = (startOffset + 1).coerceAtMost(lineEnd)
-                                val startX = layout.getHorizontalPosition(startOffset, true)
-                                val endX = layout.getHorizontalPosition(endOffset, true)
-                                lerp(startX, endX, fillFraction).coerceIn(lineLeft, lineRight)
+                                val completedChars = floor(lineFill).toInt().coerceIn(0, (lineChars - 1f).toInt())
+                                val currentOffset = (lineStart + completedChars).coerceIn(lineStart, lineEnd - 1)
+                                val currentBox = layout.getBoundingBox(currentOffset)
+                                val charLeft = currentBox.left.coerceIn(lineLeft, lineRight)
+                                val charRight = currentBox.right.coerceIn(charLeft, lineRight)
+                                val fillFraction = (lineFill - completedChars).coerceIn(0f, 1f)
+                                lerp(charLeft, charRight, fillFraction).coerceIn(lineLeft, lineRight)
                             }
                         }
                         if (right > lineLeft) {

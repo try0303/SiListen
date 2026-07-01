@@ -1,6 +1,7 @@
 package com.silisten.app.data.source
 
 import com.silisten.app.data.model.LyricLine
+import com.silisten.app.data.model.LyricWord
 import com.silisten.app.data.model.MusicPlaylist
 import com.silisten.app.data.model.MusicSourceInfo
 import com.silisten.app.data.model.PlaybackQuality
@@ -134,6 +135,16 @@ class NeteaseMusicSource(
         playlistCache[playlist.id]?.takeIf { it.expiresAt > System.currentTimeMillis() }?.item?.let {
             return@withContext it
         }
+        if (playlist.id.startsWith("netease-album-")) {
+            return@withContext albumDetail(playlist).also {
+                playlistCache[playlist.id] = CachedPlaylist(it, System.currentTimeMillis() + 5 * 60 * 1000)
+            }
+        }
+        if (playlist.id.startsWith("netease-artist-")) {
+            return@withContext artistDetail(playlist).also {
+                playlistCache[playlist.id] = CachedPlaylist(it, System.currentTimeMillis() + 5 * 60 * 1000)
+            }
+        }
         val numericId = extractPlaylistNumericId(playlist)
         val songs = runCatching {
             val json = apiClient.getJson(
@@ -154,6 +165,77 @@ class NeteaseMusicSource(
             playlistCache[playlist.id] = CachedPlaylist(it, System.currentTimeMillis() + 5 * 60 * 1000)
         }
     }
+
+    private suspend fun albumDetail(playlist: MusicPlaylist): MusicPlaylist {
+        val numericId = extractPlaylistNumericId(playlist)
+        val json = runCatching {
+            apiClient.getJson("/album?id=${numericId.encode()}&timestamp=${System.currentTimeMillis()}")
+        }.getOrNull()
+        val albumJson = json?.optJSONObject("album")
+        val songs = json?.optJSONArray("songs").orEmpty().toSongs()
+        return playlist.copy(
+            title = albumJson?.optString("name").cleanText().ifBlank { playlist.title },
+            subtitle = if (songs.isEmpty()) playlist.subtitle else "${songs.size} 首歌曲",
+            coverUrl = albumJson?.optString("picUrl").cleanText()
+                .ifBlank { playlist.coverUrl }
+                .ifBlank { songs.firstOrNull()?.coverUrl ?: defaultCover },
+            songs = songs,
+            kind = PlaylistKind.Album
+        )
+    }
+
+    private suspend fun artistDetail(playlist: MusicPlaylist): MusicPlaylist {
+        val numericId = extractPlaylistNumericId(playlist)
+        val json = runCatching {
+            apiClient.getJson("/artists?id=${numericId.encode()}&timestamp=${System.currentTimeMillis()}")
+        }.getOrNull()
+        val albumsJson = runCatching {
+            apiClient.getJson(
+                "/artist/album?id=${numericId.encode()}&limit=40&offset=0&timestamp=${System.currentTimeMillis()}"
+            )
+        }.getOrNull()
+        val artistJson = json?.optJSONObject("artist")
+        val songs = json?.optJSONArray("hotSongs").orEmpty().toSongs()
+        val albumCount = artistJson?.optInt("albumSize", playlist.albumCount) ?: playlist.albumCount
+        val songCount = artistJson?.optInt("musicSize", playlist.songCount) ?: playlist.songCount
+        val mvCount = artistJson?.optInt("mvSize", playlist.mvCount) ?: playlist.mvCount
+        val albums = albumsJson
+            ?.optJSONArray("hotAlbums")
+            .orEmpty()
+            .toAlbumShells(40)
+        return playlist.copy(
+            title = artistJson?.optString("name").cleanText().ifBlank { playlist.title },
+            subtitle = if (songs.isEmpty()) playlist.subtitle else "${songs.size} 首热门歌曲",
+            coverUrl = artistJson?.optString("picUrl").cleanText()
+                .ifBlank { artistJson?.optString("img1v1Url").cleanText() }
+                .ifBlank { playlist.coverUrl }
+                .ifBlank { songs.firstOrNull()?.coverUrl ?: defaultCover },
+            songs = songs,
+            kind = PlaylistKind.Artist,
+            description = artistJson?.optString("briefDesc").cleanText().ifBlank { playlist.description },
+            albumCount = albumCount,
+            songCount = songCount,
+            mvCount = mvCount,
+            albums = albums
+        )
+    }
+
+    suspend fun artistSongs(
+        artist: MusicPlaylist,
+        limit: Int = 50,
+        offset: Int = 0
+    ): List<Song> = withContext(Dispatchers.IO) {
+        val numericId = extractPlaylistNumericId(artist)
+        val safeLimit = limit.coerceIn(1, 50)
+        val safeOffset = offset.coerceAtLeast(0)
+        val json = apiClient.getJson(
+            "/artist/songs?id=${numericId.encode()}&limit=$safeLimit&offset=$safeOffset&order=time&timestamp=${System.currentTimeMillis()}"
+        )
+        json.optJSONArray("songs")
+            ?: json.optJSONObject("data")?.optJSONArray("songs")
+            ?: json.optJSONObject("result")?.optJSONArray("songs")
+            ?: JSONArray()
+    }.toSongs()
 
     suspend fun likedSongs(userId: Long): MusicPlaylist = withContext(Dispatchers.IO) {
         val cacheKey = "liked-$userId"
@@ -259,9 +341,25 @@ class NeteaseMusicSource(
         NeteaseActionResult(
             success = success,
             message = if (success) {
-                if (like) "已加入红心歌曲" else "已取消红心"
+                if (like) "已添加到我喜欢的音乐" else "已从我喜欢的音乐移除"
             } else {
                 json.optString("message").cleanText("歌曲红心操作失败")
+            }
+        )
+    }
+
+    suspend fun addSongToPlaylist(song: Song, playlist: MusicPlaylist): NeteaseActionResult = withContext(Dispatchers.IO) {
+        val numericId = extractPlaylistNumericId(playlist)
+        val json = apiClient.getJson(
+            "/playlist/tracks?op=add&pid=${numericId.encode()}&tracks=${song.id.encode()}&timestamp=${System.currentTimeMillis()}"
+        )
+        val success = json.optInt("code") == 200
+        NeteaseActionResult(
+            success = success,
+            message = if (success) {
+                "已添加到${playlist.title}"
+            } else {
+                json.optString("message").cleanText("加入歌单失败")
             }
         )
     }
@@ -306,16 +404,86 @@ class NeteaseMusicSource(
         }
     }
 
-    override suspend fun search(keyword: String): List<Song> = withContext(Dispatchers.IO) {
+    override suspend fun search(keyword: String): List<Song> = searchSongs(keyword)
+
+    suspend fun searchSongs(
+        keyword: String,
+        limit: Int = 30,
+        offset: Int = 0
+    ): List<Song> = withContext(Dispatchers.IO) {
         val query = keyword.trim().ifEmpty { "华语流行" }
-        searchCache[query]?.takeIf { it.expiresAt > System.currentTimeMillis() }?.songs?.let {
+        val safeLimit = limit.coerceIn(1, 60)
+        val safeOffset = offset.coerceAtLeast(0)
+        val cacheKey = "songs:$query:$safeLimit:$safeOffset"
+        searchCache[cacheKey]?.takeIf { it.expiresAt > System.currentTimeMillis() }?.songs?.let {
             return@withContext it
         }
 
-        val songs = searchNeteaseGateway(query)
+        val songs = searchNeteaseGateway(
+            query = query,
+            limit = safeLimit,
+            offset = safeOffset
+        )
         val ttl = if (songs.isEmpty()) 60_000L else 3 * 60 * 1000L
-        searchCache[query] = CachedSearch(songs, System.currentTimeMillis() + ttl)
+        searchCache[cacheKey] = CachedSearch(songs, System.currentTimeMillis() + ttl)
         songs
+    }
+
+    suspend fun searchPlaylists(
+        keyword: String,
+        limit: Int = 20,
+        offset: Int = 0
+    ): List<MusicPlaylist> = withContext(Dispatchers.IO) {
+        searchCollectionShells(
+            keyword = keyword,
+            limit = limit,
+            offset = offset,
+            type = "1000",
+            cachePrefix = "search-playlists"
+        ) { json ->
+            json.optJSONObject("result")
+                ?.optJSONArray("playlists")
+                .orEmpty()
+                .toPlaylistShells(limit.coerceIn(1, 50))
+        }
+    }
+
+    suspend fun searchAlbums(
+        keyword: String,
+        limit: Int = 20,
+        offset: Int = 0
+    ): List<MusicPlaylist> = withContext(Dispatchers.IO) {
+        searchCollectionShells(
+            keyword = keyword,
+            limit = limit,
+            offset = offset,
+            type = "10",
+            cachePrefix = "search-albums"
+        ) { json ->
+            json.optJSONObject("result")
+                ?.optJSONArray("albums")
+                .orEmpty()
+                .toAlbumShells(limit.coerceIn(1, 50))
+        }
+    }
+
+    suspend fun searchArtists(
+        keyword: String,
+        limit: Int = 20,
+        offset: Int = 0
+    ): List<MusicPlaylist> = withContext(Dispatchers.IO) {
+        searchCollectionShells(
+            keyword = keyword,
+            limit = limit,
+            offset = offset,
+            type = "100",
+            cachePrefix = "search-artists"
+        ) { json ->
+            json.optJSONObject("result")
+                ?.optJSONArray("artists")
+                .orEmpty()
+                .toArtistShells(limit.coerceIn(1, 50))
+        }
     }
 
     override suspend fun streamUrl(song: Song): String = withContext(Dispatchers.IO) {
@@ -339,19 +507,35 @@ class NeteaseMusicSource(
         }
         val lines = runCatching {
             val json = apiClient.getJson("/lyric?id=${song.id.encode()}&timestamp=${System.currentTimeMillis()}")
-            json.optJSONObject("lrc")?.optString("lyric").orEmpty().parseLrc()
+            val yrcText = json.optJSONObject("yrc")?.optString("lyric").orEmpty()
+            val yrcLines = yrcText.parseYrc()
+            val lrcText = json.optJSONObject("lrc")?.optString("lyric").orEmpty()
+            val tlyricText = json.optJSONObject("tlyric")?.optString("lyric").orEmpty()
+            val romalrcText = json.optJSONObject("romalrc")?.optString("lyric").orEmpty()
+            val baseLines = if (yrcLines.isNotEmpty()) yrcLines else lrcText.parseLrc()
+            mergeLyrics(
+                mainLines = baseLines,
+                translationLines = tlyricText.parseLrc(),
+                romanizationLines = romalrcText.parseLrc()
+            )
         }.getOrDefault(emptyList())
-        val playableLines = lines.ifEmpty {
-            listOf(LyricLine(0L, "暂时没有歌词"))
+        if (lines.isNotEmpty()) {
+            lyricCache[song.id] = CachedLyrics(lines, System.currentTimeMillis() + 30 * 60 * 1000L)
+            return@withContext lines
         }
-        lyricCache[song.id] = CachedLyrics(playableLines, System.currentTimeMillis() + 30 * 60 * 1000)
-        playableLines
+        listOf(LyricLine(0L, "暂时没有歌词"))
     }
 
-    private suspend fun searchNeteaseGateway(query: String): List<Song> {
+    private suspend fun searchNeteaseGateway(
+        query: String,
+        limit: Int,
+        offset: Int
+    ): List<Song> {
         val encodedQuery = query.encode()
         val json = runCatching {
-            apiClient.getJson("/search?keywords=$encodedQuery&limit=30&timestamp=${System.currentTimeMillis()}")
+            apiClient.getJson(
+                "/search?keywords=$encodedQuery&type=1&limit=$limit&offset=$offset&timestamp=${System.currentTimeMillis()}"
+            )
         }.getOrNull() ?: return seedSongs().filterBy(query)
 
         val songs = json.optJSONObject("result")?.optJSONArray("songs").orEmpty()
@@ -376,7 +560,38 @@ class NeteaseMusicSource(
                     )
                 )
             }
-        }.ifEmpty { seedSongs().filterBy(query) }
+        }.ifEmpty {
+            if (offset == 0) seedSongs().filterBy(query) else emptyList()
+        }
+    }
+
+    private suspend fun searchCollectionShells(
+        keyword: String,
+        limit: Int,
+        offset: Int,
+        type: String,
+        cachePrefix: String,
+        parser: (JSONObject) -> List<MusicPlaylist>
+    ): List<MusicPlaylist> {
+        val query = keyword.trim().ifEmpty { "华语流行" }
+        val safeLimit = limit.coerceIn(1, 50)
+        val safeOffset = offset.coerceAtLeast(0)
+        val cacheKey = "$cachePrefix:$query:$safeLimit:$safeOffset"
+        playlistListCache[cacheKey]?.takeIf { it.expiresAt > System.currentTimeMillis() }?.items?.let {
+            return it
+        }
+        val encodedQuery = query.encode()
+        val items = runCatching {
+            val json = apiClient.getJson(
+                "/search?keywords=$encodedQuery&type=$type&limit=$safeLimit&offset=$safeOffset&timestamp=${System.currentTimeMillis()}"
+            )
+            parser(json)
+        }.getOrDefault(emptyList())
+        playlistListCache[cacheKey] = CachedPlaylistList(
+            items,
+            System.currentTimeMillis() + if (items.isEmpty()) 60_000L else 3 * 60 * 1000L
+        )
+        return items
     }
 
     private suspend fun officialStreamUrl(song: Song, quality: PlaybackQuality): String {
@@ -483,6 +698,66 @@ class NeteaseMusicSource(
                             .ifBlank { defaultCover },
                         songs = emptyList(),
                         kind = kind
+                    )
+                )
+            }
+        }
+    }
+
+    private fun JSONArray.toAlbumShells(limit: Int): List<MusicPlaylist> {
+        return buildList {
+            for (index in 0 until length().coerceAtMost(limit)) {
+                val item = optJSONObject(index) ?: continue
+                val id = item.optString("id")
+                if (id.isBlank()) continue
+                val artistName = item.optJSONObject("artist")?.optString("name").cleanText()
+                    .ifBlank { item.optJSONArray("artists").artistNames() }
+                val size = item.optInt("size", 0)
+                add(
+                    MusicPlaylist(
+                        id = "netease-album-$id",
+                        title = item.optString("name").cleanText("网易云专辑"),
+                        subtitle = listOfNotNull(
+                            artistName.takeIf { it.isNotBlank() },
+                            size.takeIf { it > 0 }?.let { "$it 首歌曲" }
+                        ).joinToString(" · ").ifBlank { "专辑" },
+                        coverUrl = item.optString("picUrl").cleanText()
+                            .ifBlank { item.optString("blurPicUrl").cleanText() }
+                            .ifBlank { defaultCover },
+                        songs = emptyList(),
+                        kind = PlaylistKind.Album,
+                        songCount = size
+                    )
+                )
+            }
+        }
+    }
+
+    private fun JSONArray.toArtistShells(limit: Int): List<MusicPlaylist> {
+        return buildList {
+            for (index in 0 until length().coerceAtMost(limit)) {
+                val item = optJSONObject(index) ?: continue
+                val id = item.optString("id")
+                if (id.isBlank()) continue
+                val musicSize = item.optInt("musicSize", item.optInt("songSize", 0))
+                val albumSize = item.optInt("albumSize", 0)
+                val subtitle = buildList {
+                    if (musicSize > 0) add("$musicSize 首歌曲")
+                    if (albumSize > 0) add("$albumSize 张专辑")
+                }.joinToString(" · ").ifBlank { "歌手" }
+                add(
+                    MusicPlaylist(
+                        id = "netease-artist-$id",
+                        title = item.optString("name").cleanText("网易云歌手"),
+                        subtitle = subtitle,
+                        coverUrl = item.optString("img1v1Url").cleanText()
+                            .ifBlank { item.optString("picUrl").cleanText() }
+                            .ifBlank { defaultCover },
+                        songs = emptyList(),
+                        kind = PlaylistKind.Artist,
+                        albumCount = albumSize,
+                        songCount = musicSize,
+                        mvCount = item.optInt("mvSize", 0)
                     )
                 )
             }
@@ -614,6 +889,63 @@ class NeteaseMusicSource(
                 }
             }
         }.sortedBy { it.timeMs }.toList()
+    }
+
+    private fun String.parseYrc(): List<LyricLine> {
+        // YRC format: [lineStartMs,lineDurationMs] then (wordOffsetMs,wordDurationMs,0)text per word
+        // wordOffsetMs may be absolute (relative to song start) or relative (relative to line start).
+        // We normalize to relative-to-line-start on parse so downstream always uses relative.
+        val linePattern = Regex("\\[(\\d+),(\\d+)](.+)")
+        val wordPattern = Regex("\\((\\d+),(\\d+),\\d+\\)([^(]*)")
+        return lineSequence().mapNotNull { rawLine ->
+            val lineMatch = linePattern.find(rawLine.trim()) ?: return@mapNotNull null
+            val lineStartMs = lineMatch.groupValues[1].toLongOrNull() ?: return@mapNotNull null
+            val wordSection = lineMatch.groupValues[3]
+            val rawWords = wordPattern.findAll(wordSection).mapNotNull { wm ->
+                val offsetMs = wm.groupValues[1].toLongOrNull() ?: return@mapNotNull null
+                val durationMs = wm.groupValues[2].toLongOrNull() ?: return@mapNotNull null
+                val text = wm.groupValues[3]
+                if (text.isBlank()) return@mapNotNull null
+                Triple(offsetMs, durationMs, text)
+            }.toList()
+            if (rawWords.isEmpty()) return@mapNotNull null
+            val firstOffset = rawWords.first().first
+            val isAbsolute = firstOffset >= lineStartMs && lineStartMs > 0L
+            val words = rawWords.map { (offset, duration, text) ->
+                val relativeOffset = if (isAbsolute) (offset - lineStartMs).coerceAtLeast(0L) else offset
+                LyricWord(offsetMs = relativeOffset, durationMs = duration, text = text)
+            }
+            val fullText = words.joinToString("") { it.text }.trim()
+            if (fullText.isBlank()) return@mapNotNull null
+            LyricLine(timeMs = lineStartMs, text = fullText, words = words)
+        }.sortedBy { it.timeMs }.toList()
+    }
+
+    private fun mergeLyrics(
+        mainLines: List<LyricLine>,
+        translationLines: List<LyricLine>,
+        romanizationLines: List<LyricLine>
+    ): List<LyricLine> {
+        val baseLines = mainLines.ifEmpty { translationLines }.ifEmpty { romanizationLines }
+        if (baseLines.isEmpty()) return emptyList()
+        return baseLines.map { line ->
+            val translation = translationLines.closestTextTo(line.timeMs)
+                ?.takeIf { it != line.text }
+            val romanization = romanizationLines.closestTextTo(line.timeMs)
+                ?.takeIf { it != line.text && it != translation }
+            line.copy(
+                translation = translation,
+                romanization = romanization
+            )
+        }.sortedBy { it.timeMs }
+    }
+
+    private fun List<LyricLine>.closestTextTo(timeMs: Long): String? {
+        if (isEmpty()) return null
+        val nearest = minByOrNull { kotlin.math.abs(it.timeMs - timeMs) } ?: return null
+        return nearest.text.takeIf {
+            it.isNotBlank() && kotlin.math.abs(nearest.timeMs - timeMs) <= 500L
+        }
     }
 
     private data class CachedStreamUrl(

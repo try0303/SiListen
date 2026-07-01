@@ -25,6 +25,62 @@ class MusicRepository(
     suspend fun search(sourceId: String, query: String): List<Song> =
         source(sourceId).search(query)
 
+    suspend fun searchSongs(
+        sourceId: String,
+        query: String,
+        limit: Int,
+        offset: Int
+    ): List<Song> {
+        val source = source(sourceId)
+        return if (source is NeteaseMusicSource) {
+            source.searchSongs(query, limit, offset)
+        } else {
+            if (offset == 0) source.search(query).take(limit) else emptyList()
+        }
+    }
+
+    suspend fun searchPlaylists(
+        sourceId: String,
+        query: String,
+        limit: Int,
+        offset: Int
+    ): List<MusicPlaylist> {
+        val source = source(sourceId)
+        return if (source is NeteaseMusicSource) {
+            source.searchPlaylists(query, limit, offset)
+        } else {
+            emptyList()
+        }
+    }
+
+    suspend fun searchAlbums(
+        sourceId: String,
+        query: String,
+        limit: Int,
+        offset: Int
+    ): List<MusicPlaylist> {
+        val source = source(sourceId)
+        return if (source is NeteaseMusicSource) {
+            source.searchAlbums(query, limit, offset)
+        } else {
+            emptyList()
+        }
+    }
+
+    suspend fun searchArtists(
+        sourceId: String,
+        query: String,
+        limit: Int,
+        offset: Int
+    ): List<MusicPlaylist> {
+        val source = source(sourceId)
+        return if (source is NeteaseMusicSource) {
+            source.searchArtists(query, limit, offset)
+        } else {
+            emptyList()
+        }
+    }
+
     suspend fun lyrics(song: Song): List<LyricLine> =
         source(song.sourceId).lyrics(song)
 
@@ -42,6 +98,12 @@ class MusicRepository(
 
     suspend fun neteasePlaylistDetail(playlist: MusicPlaylist): MusicPlaylist =
         netease().playlistDetail(playlist)
+
+    suspend fun neteaseArtistSongs(
+        artist: MusicPlaylist,
+        limit: Int,
+        offset: Int
+    ): List<Song> = netease().artistSongs(artist, limit, offset)
 
     suspend fun neteaseLikedSongs(userId: Long): MusicPlaylist =
         netease().likedSongs(userId)
@@ -80,6 +142,11 @@ class MusicRepository(
         song: Song,
         like: Boolean
     ): NeteaseActionResult = netease().toggleSongLike(song, like)
+
+    suspend fun neteaseAddSongToPlaylist(
+        song: Song,
+        playlist: MusicPlaylist
+    ): NeteaseActionResult = netease().addSongToPlaylist(song, playlist)
 
     private fun netease(): NeteaseMusicSource =
         registry.byId("netease") as? NeteaseMusicSource

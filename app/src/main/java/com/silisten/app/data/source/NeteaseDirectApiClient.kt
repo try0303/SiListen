@@ -130,6 +130,38 @@ internal class NeteaseDirectApiClient(
                 )
             )
 
+            "/album" -> postWeApi(
+                "/weapi/v1/album/${request.param("id").encodeQuery()}",
+                emptyMap()
+            )
+
+            "/artists" -> postWeApi(
+                "/weapi/v1/artist/${request.param("id").encodeQuery()}",
+                emptyMap()
+            )
+
+            "/artist/album" -> postWeApi(
+                "/weapi/artist/albums/${request.param("id").encodeQuery()}",
+                mapOf(
+                    "limit" to request.param("limit", "30"),
+                    "offset" to request.param("offset", "0"),
+                    "total" to true
+                )
+            )
+
+            "/artist/songs" -> postEApi(
+                requestPath = "/eapi/v1/artist/songs",
+                encryptPath = "/api/v1/artist/songs",
+                data = mapOf(
+                    "id" to request.param("id"),
+                    "private_cloud" to "true",
+                    "work_type" to 1,
+                    "order" to request.param("order", "hot"),
+                    "limit" to request.param("limit", "50"),
+                    "offset" to request.param("offset", "0")
+                )
+            )
+
             "/song/url/v1" -> postWeApi(
                 "/weapi/song/enhance/player/url/v1",
                 mapOf(
@@ -152,12 +184,14 @@ internal class NeteaseDirectApiClient(
             )
 
             "/lyric" -> postWeApi(
-                "/weapi/song/lyric",
+                "/weapi/song/lyric/v1",
                 mapOf(
                     "id" to request.param("id"),
                     "lv" to -1,
                     "kv" to -1,
-                    "tv" to -1
+                    "tv" to -1,
+                    "rv" to -1,
+                    "yv" to 1
                 )
             )
 
@@ -189,6 +223,30 @@ internal class NeteaseDirectApiClient(
             "/likelist" -> postWeApi(
                 "/weapi/song/like/get",
                 mapOf("uid" to request.param("uid"))
+            )
+
+            "/like" -> postWeApi(
+                "/weapi/radio/like?alg=${request.param("alg", "itembased").encodeQuery()}",
+                mapOf(
+                    "trackId" to request.param("id"),
+                    "like" to (request.param("like", "true").toBooleanStrictOrNull() ?: true),
+                    "time" to request.param("time", "25")
+                )
+            )
+
+            "/playlist/tracks" -> postWeApi(
+                "/weapi/playlist/manipulate/tracks",
+                mapOf(
+                    "op" to request.param("op", "add"),
+                    "pid" to request.param("pid"),
+                    "trackIds" to JSONArray(
+                        request.param("tracks")
+                            .split(",")
+                            .filter { it.isNotBlank() }
+                            .map { it.trim().toLongOrNull() ?: it.trim() }
+                    ).toString(),
+                    "imme" to true
+                )
             )
 
             "/user/cloud" -> postWeApi(
@@ -249,8 +307,9 @@ internal class NeteaseDirectApiClient(
             payload.put("csrf_token", csrf)
         }
         val encrypted = NeteaseCrypto.weApi(payload.toString())
+        val separator = if (apiPath.contains("?")) "&" else "?"
         val request = Request.Builder()
-            .url("$MUSIC_URL$apiPath?csrf_token=${csrf.encodeQuery()}")
+            .url("$MUSIC_URL$apiPath${separator}csrf_token=${csrf.encodeQuery()}")
             .headers(commonHeaders())
             .post(
                 FormBody.Builder()
@@ -262,15 +321,18 @@ internal class NeteaseDirectApiClient(
         return execute(request)
     }
 
-    @Suppress("unused")
-    private fun postEApi(apiPath: String, data: Map<String, Any?>): String {
+    private fun postEApi(
+        requestPath: String,
+        data: Map<String, Any?>,
+        encryptPath: String = requestPath.removePrefix("/eapi").let { "/api$it" }
+    ): String {
         val payload = JSONObject()
         data.forEach { (key, value) -> payload.put(key, value.toJsonValue()) }
         payload.put("header", JSONObject(eApiHeader()))
-        val encrypted = NeteaseCrypto.eApi(apiPath.removePrefix("/eapi"), payload.toString())
+        val encrypted = NeteaseCrypto.eApi(encryptPath, payload.toString())
         val body = "params=${encrypted.params}".toRequestBody(FORM_MEDIA_TYPE)
         val request = Request.Builder()
-            .url("$MUSIC_URL$apiPath")
+            .url("$INTERFACE_URL$requestPath")
             .headers(commonHeaders())
             .post(body)
             .build()
