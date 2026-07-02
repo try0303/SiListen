@@ -7,6 +7,8 @@ class MusicSourceRegistry(private val sources: List<MusicSource>) {
 
     fun default(): MusicSource = sources.first()
 
+    fun findById(id: String): MusicSource? = sources.firstOrNull { it.info.id == id }
+
     fun byId(id: String): MusicSource = sources.firstOrNull { it.info.id == id } ?: default()
 
     companion object {
@@ -16,6 +18,10 @@ class MusicSourceRegistry(private val sources: List<MusicSource>) {
         ): MusicSourceRegistry = MusicSourceRegistry(
             listOf(
                 NeteaseMusicSource(apiClient, qualityProvider),
+                LxPlatformMusicSource.kuwo(),
+                LxPlatformMusicSource.kugou(),
+                LxPlatformMusicSource.qq(),
+                LxPlatformMusicSource.migu(),
                 LocalMusicSource(),
                 DemoMusicSource()
             )

@@ -606,7 +606,7 @@ fun PlaylistDetailScreen(
                                 liked = isSongLiked(song),
                                 likeLoading = isSongLikeLoading(song),
                                 onClick = { onSongClick(song) },
-                                onLikeClick = if (song.sourceId == "netease") ({ onToggleSongLike(song) }) else null,
+                                onLikeClick = if (song.sourceId != "local") ({ onToggleSongLike(song) }) else null,
                                 onMoreClick = { actionSong = song }
                             )
                         }
@@ -913,7 +913,7 @@ fun ArtistDetailScreen(
                                         liked = isSongLiked(song),
                                         likeLoading = isSongLikeLoading(song),
                                         onClick = { onSongClick(song) },
-                                        onLikeClick = if (song.sourceId == "netease") ({ onToggleSongLike(song) }) else null,
+                                        onLikeClick = if (song.sourceId != "local") ({ onToggleSongLike(song) }) else null,
                                         onMoreClick = { actionSong = song }
                                     )
                                 }
@@ -947,7 +947,7 @@ fun ArtistDetailScreen(
                                     liked = isSongLiked(song),
                                     likeLoading = isSongLikeLoading(song),
                                     onClick = { onSongClick(song) },
-                                    onLikeClick = if (song.sourceId == "netease") ({ onToggleSongLike(song) }) else null,
+                                    onLikeClick = if (song.sourceId != "local") ({ onToggleSongLike(song) }) else null,
                                     onMoreClick = { actionSong = song }
                                 )
                             }
@@ -990,7 +990,7 @@ fun ArtistDetailScreen(
                                     liked = isSongLiked(song),
                                     likeLoading = isSongLikeLoading(song),
                                     onClick = { onSongClick(song) },
-                                    onLikeClick = if (song.sourceId == "netease") ({ onToggleSongLike(song) }) else null,
+                                    onLikeClick = if (song.sourceId != "local") ({ onToggleSongLike(song) }) else null,
                                     onMoreClick = { actionSong = song }
                                 )
                             }

@@ -22,15 +22,27 @@ import com.silisten.app.data.model.PlaylistCommentSort
 import com.silisten.app.data.model.PlaylistKind
 import com.silisten.app.data.model.PlaylistRoute
 import com.silisten.app.data.model.Song
+import com.silisten.app.data.model.CustomPlaybackSourceType
+import com.silisten.app.data.model.CustomSourceConfig
+import com.silisten.app.data.model.inferCustomSourceType
+import com.silisten.app.data.model.normalizeCustomSourceType
+import com.silisten.app.data.model.SourcePlatformIds
+import com.silisten.app.data.model.SourceSettingsState
+import com.silisten.app.data.model.neteaseIdentityId
+import com.silisten.app.data.model.normalizeBuiltInPlatformId
 import com.silisten.app.data.repository.AccountRepository
 import com.silisten.app.data.repository.MusicRepository
 import com.silisten.app.data.repository.RecentPlaybackStore
+import com.silisten.app.data.repository.SourceSettingsStore
 import com.silisten.app.data.source.MusicSourceRegistry
+import com.silisten.app.data.source.CustomPlaybackSourceClient
 import com.silisten.app.data.source.NeteaseApiClient
 import com.silisten.app.data.source.NeteaseLoginState
 import com.silisten.app.playback.PlaybackState
 import com.silisten.app.playback.PlaybackCenter
 import com.silisten.app.playback.PlaybackNotificationBridge
+import com.silisten.app.playback.PlaybackStreamResolver
+import com.silisten.app.playback.PlaybackMode
 import kotlinx.coroutines.async
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
@@ -76,7 +88,16 @@ data class ThemeSettingsState(
 data class PlaybackSettingsState(
     val quality: PlaybackQuality = PlaybackQuality.ExHigh,
     val lyricDisplayMode: LyricDisplayMode = LyricDisplayMode.Glass,
+    val playbackMode: PlaybackMode = PlaybackMode.Order,
     val statusBarLyricEnabled: Boolean = false
+)
+
+data class SleepTimerState(
+    val active: Boolean = false,
+    val durationMinutes: Int = 0,
+    val remainingMs: Long = 0L,
+    val waitUntilSongEnds: Boolean = false,
+    val pendingStopAfterCurrentSong: Boolean = false
 )
 
 data class ArtistSongsPageState(
@@ -92,6 +113,7 @@ data class SiListenUiState(
     val settingsRoute: SettingsRoute = SettingsRoute.Main,
     val themeSettings: ThemeSettingsState = ThemeSettingsState(),
     val playbackSettings: PlaybackSettingsState = PlaybackSettingsState(),
+    val sourceSettings: SourceSettingsState = SourceSettingsState(),
     val selectedSourceId: String = "netease",
     val featured: List<MusicPlaylist> = emptyList(),
     val dailyDiscovery: MusicPlaylist? = null,
@@ -144,6 +166,7 @@ data class SiListenUiState(
     val isSearching: Boolean = false,
     val lyrics: List<LyricLine> = emptyList(),
     val isLyricLoading: Boolean = false,
+    val sleepTimer: SleepTimerState = SleepTimerState(),
     val message: String? = null
 )
 
@@ -185,6 +208,8 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
     private val themePreferences = application.getSharedPreferences("theme_settings", Context.MODE_PRIVATE)
     private val playbackPreferences = application.getSharedPreferences("playback_settings", Context.MODE_PRIVATE)
     private val recentPlaybackStore = RecentPlaybackStore(application)
+    private val sourceSettingsStore = SourceSettingsStore(application)
+    private val initialSourceSettings = sourceSettingsStore.load()
     private val themePreferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == null || key in themePreferenceKeys) {
             val next = loadThemeSettings()
@@ -194,16 +219,19 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         }
     }
     private val musicRepository = MusicRepository(
-        MusicSourceRegistry.create(neteaseApiClient) { currentPlaybackQuality() }
+        registry = MusicSourceRegistry.create(neteaseApiClient) { currentPlaybackQuality() },
+        customPlaybackSourceClient = CustomPlaybackSourceClient(application),
+        playbackQualityProvider = { currentPlaybackQuality() }
     )
     val registry: MusicSourceRegistry = musicRepository.registry
     private val player = PlaybackCenter.controller(application)
 
     var uiState by mutableStateOf(
         SiListenUiState(
-            selectedSourceId = registry.default().info.id,
+            selectedSourceId = SourcePlatformIds.ALL,
             themeSettings = loadThemeSettings(),
             playbackSettings = loadPlaybackSettings(),
+            sourceSettings = initialSourceSettings,
             recentPlayedSongs = recentPlaybackStore.load()
         )
     )
@@ -225,6 +253,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
     private var libraryJob: Job? = null
     private var playerCommentsJob: Job? = null
     private var artistSongsJob: Job? = null
+    private var sleepTimerJob: Job? = null
     private var loadedLyricSongId: String? = null
     private var loadedPlayerCommentSongId: String? = null
     private var lastRecentSongId: String? = null
@@ -236,10 +265,15 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
     val playbackState: PlaybackState
         get() = player.state
 
+    private fun playbackResolver(): PlaybackStreamResolver = { song ->
+        musicRepository.resolvePlayable(song, uiState.sourceSettings)
+    }
+
     init {
         themePreferences.registerOnSharedPreferenceChangeListener(themePreferenceListener)
         PlaybackNotificationBridge.attachLikeHandler(notificationLikeHandler)
         PlaybackNotificationBridge.attachLikeStateProvider(notificationLikeStateProvider)
+        player.setPlaybackMode(uiState.playbackSettings.playbackMode)
         viewModelScope.launch {
             loadFeatured()
         }
@@ -254,6 +288,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
                 syncRecentPlayback()
                 syncLyricsWithPlayback()
                 syncStatusBarLyricWithPlayback()
+                syncSleepTimerWithPlayback()
                 delay(100)
             }
         }
@@ -360,6 +395,13 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         syncStatusBarLyricWithPlayback()
     }
 
+    fun selectPlaybackMode(mode: PlaybackMode) {
+        val next = uiState.playbackSettings.copy(playbackMode = mode)
+        uiState = uiState.copy(playbackSettings = next)
+        savePlaybackSettings(next)
+        player.setPlaybackMode(mode)
+    }
+
     fun selectSource(sourceId: String) {
         searchJob?.cancel()
         uiState = uiState.copy(
@@ -376,6 +418,253 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
             isLoadingMoreSearch = false
         )
         loadFeatured()
+    }
+
+    fun setAutoSourceFallbackEnabled(enabled: Boolean) {
+        updateSourceSettings { copy(autoSourceFallbackEnabled = enabled) }
+    }
+
+    fun setSearchPlatformEnabled(platformId: String, enabled: Boolean) {
+        val normalizedId = normalizeBuiltInPlatformId(platformId)
+        updateSourceSettings {
+            val next = if (enabled) {
+                enabledSearchPlatformIds + normalizedId
+            } else {
+                enabledSearchPlatformIds - normalizedId
+            }
+            copy(enabledSearchPlatformIds = next)
+        }
+        rerunSearchIfNeeded()
+    }
+
+    fun setCommentPlatformEnabled(platformId: String, enabled: Boolean) {
+        val normalizedId = normalizeBuiltInPlatformId(platformId)
+        updateSourceSettings {
+            val next = if (enabled) {
+                enabledCommentPlatformIds + normalizedId
+            } else {
+                enabledCommentPlatformIds - normalizedId
+            }
+            copy(enabledCommentPlatformIds = next)
+        }
+        loadedPlayerCommentSongId = null
+        playbackState.currentSong?.let { loadPlayerComments(it, force = true) }
+    }
+
+    fun saveCustomSource(config: CustomSourceConfig) {
+        val name = config.name.trim()
+        val endpoint = config.endpoint.trim()
+        if (name.isBlank()) {
+            uiState = uiState.copy(message = "\u8bf7\u586b\u5199\u97f3\u6e90\u540d\u79f0")
+            return
+        }
+        if (config.script.isBlank() && !endpoint.startsWith("http://") && !endpoint.startsWith("https://")) {
+            uiState = uiState.copy(message = "\u63a5\u53e3\u5730\u5740\u9700\u8981\u4ee5 http:// \u6216 https:// \u5f00\u5934")
+            return
+        }
+        val nextConfig = config.copy(
+            id = config.id.ifBlank { SourceSettingsStore.newCustomSourceId() },
+            name = name,
+            endpoint = endpoint,
+            type = normalizeCustomSourceType(
+                endpoint,
+                if (config.endpoint != endpoint) inferCustomSourceType(endpoint) else config.type
+            )
+        )
+        updateSourceSettings {
+            val exists = customSources.any { it.id == nextConfig.id }
+            copy(
+                customSources = if (exists) {
+                    customSources.map { if (it.id == nextConfig.id) nextConfig else it }
+                } else {
+                    customSources + nextConfig
+                }
+            )
+        }
+        uiState = uiState.copy(message = "\u97f3\u6e90\u914d\u7f6e\u5df2\u4fdd\u5b58")
+    }
+
+    fun importCustomSourceFromUrl(endpoint: String) {
+        val url = endpoint.trim()
+        if (!url.startsWith("http://") && !url.startsWith("https://")) {
+            uiState = uiState.copy(message = "请输入以 http:// 或 https:// 开头的脚本链接")
+            return
+        }
+        if (uiState.sourceSettings.customSources.size >= 20 &&
+            uiState.sourceSettings.customSources.none { it.endpoint.trim() == url }
+        ) {
+            uiState = uiState.copy(message = "最多只能保留 20 个自定义源，请先删除不常用的源")
+            return
+        }
+        val initialConfig = CustomSourceConfig(
+            id = SourceSettingsStore.newCustomSourceId(),
+            name = "自定义源",
+            endpoint = url,
+            enabled = true,
+            type = CustomPlaybackSourceType.LxScript
+        )
+        uiState = uiState.copy(message = "正在导入自定义源...")
+        viewModelScope.launch {
+            val importResult = runCatching {
+                musicRepository.importCustomSourceScript(url)
+            }.getOrElse { error ->
+                uiState = uiState.copy(message = "自定义源导入失败：${error.message.orEmpty().ifBlank { "脚本无法初始化" }}")
+                return@launch
+            } ?: run {
+                uiState = uiState.copy(message = "自定义源导入失败：无法下载脚本，请检查链接或网络")
+                return@launch
+            }
+            val result = importResult.inspect
+            if (!result.ok) {
+                uiState = uiState.copy(message = "自定义源导入失败：${result.message}")
+                return@launch
+            }
+            val imported = initialConfig.copy(
+                id = uiState.sourceSettings.customSources
+                    .firstOrNull { it.endpoint.trim() == url }
+                    ?.id
+                    ?: initialConfig.id,
+                name = result.displayName?.takeIf { it.isNotBlank() }
+                    ?: initialConfig.name,
+                description = result.description.orEmpty(),
+                author = result.author.orEmpty(),
+                homepage = result.homepage.orEmpty(),
+                version = result.version.orEmpty(),
+                supportedSources = result.supportedSources,
+                allowShowUpdateAlert = true,
+                script = importResult.script
+            )
+            updateSourceSettings {
+                val exists = customSources.any { it.id == imported.id || it.endpoint.trim() == imported.endpoint }
+                copy(
+                    customSources = if (exists) {
+                        customSources.map { source ->
+                            if (source.id == imported.id || source.endpoint.trim() == imported.endpoint) imported else source
+                        }
+                    } else {
+                        customSources + imported
+                    }
+                )
+            }
+            uiState = uiState.copy(message = "自定义源导入成功：${imported.name}")
+        }
+    }
+
+    fun importCustomSourceFromScript(fileName: String, script: String) {
+        val cleanScript = script.trim()
+        if (cleanScript.isBlank()) {
+            uiState = uiState.copy(message = "自定义源导入失败：脚本内容为空")
+            return
+        }
+        if (uiState.sourceSettings.customSources.size >= 20) {
+            uiState = uiState.copy(message = "最多只能保留 20 个自定义源，请先删除不常用的源")
+            return
+        }
+        uiState = uiState.copy(message = "正在导入本地自定义源...")
+        viewModelScope.launch {
+            val result = runCatching {
+                musicRepository.inspectCustomSourceScript(cleanScript)
+            }.getOrElse { error ->
+                uiState = uiState.copy(message = "自定义源导入失败：${error.message.orEmpty().ifBlank { "脚本无法初始化" }}")
+                return@launch
+            }
+            if (!result.ok) {
+                uiState = uiState.copy(message = "自定义源导入失败：${result.message}")
+                return@launch
+            }
+            val endpoint = "local://${fileName.ifBlank { "custom-source.js" }}"
+            val imported = CustomSourceConfig(
+                id = SourceSettingsStore.newCustomSourceId(),
+                name = result.displayName?.takeIf { it.isNotBlank() } ?: "本地自定义源",
+                endpoint = endpoint,
+                enabled = true,
+                type = CustomPlaybackSourceType.LxScript,
+                description = result.description.orEmpty(),
+                author = result.author.orEmpty(),
+                homepage = result.homepage.orEmpty(),
+                version = result.version.orEmpty(),
+                supportedSources = result.supportedSources,
+                allowShowUpdateAlert = true,
+                script = cleanScript
+            )
+            updateSourceSettings {
+                copy(customSources = customSources + imported)
+            }
+            uiState = uiState.copy(message = "自定义源导入成功：${imported.name}")
+        }
+    }
+
+    fun setCustomSourceEnabled(sourceId: String, enabled: Boolean) {
+        updateSourceSettings {
+            copy(
+                customSources = customSources.map { source ->
+                    if (source.id == sourceId) source.copy(enabled = enabled) else source
+                }
+            )
+        }
+    }
+
+    fun setCustomSourceAllowUpdateAlert(sourceId: String, enabled: Boolean) {
+        updateSourceSettings {
+            copy(
+                customSources = customSources.map { source ->
+                    if (source.id == sourceId) source.copy(allowShowUpdateAlert = enabled) else source
+                }
+            )
+        }
+    }
+
+    fun deleteCustomSource(sourceId: String) {
+        updateSourceSettings {
+            copy(customSources = customSources.filterNot { it.id == sourceId })
+        }
+        uiState = uiState.copy(message = "\u5df2\u5220\u9664\u81ea\u5b9a\u4e49\u97f3\u6e90")
+    }
+
+    fun testCustomSource(config: CustomSourceConfig) {
+        val name = config.name.trim()
+        val endpoint = config.endpoint.trim()
+        when {
+            name.isBlank() -> {
+                uiState = uiState.copy(message = "请填写音源名称")
+                return
+            }
+            config.script.isBlank() && !endpoint.startsWith("http://") && !endpoint.startsWith("https://") -> {
+                uiState = uiState.copy(message = "音源地址需要以 http:// 或 https:// 开头")
+                return
+            }
+        }
+        uiState = uiState.copy(message = "正在测试自定义音源...")
+        viewModelScope.launch {
+            val result = runCatching {
+                musicRepository.inspectCustomSource(
+                    config.copy(
+                        name = name,
+                        endpoint = endpoint,
+                        type = normalizeCustomSourceType(
+                            endpoint,
+                            if (config.endpoint != endpoint) inferCustomSourceType(endpoint) else config.type
+                        )
+                    )
+                )
+            }.getOrElse { error ->
+                uiState = uiState.copy(message = "音源测试失败：${error.message.orEmpty()}")
+                return@launch
+            }
+            uiState = uiState.copy(
+                message = if (result.ok) {
+                    result.message
+                } else {
+                    result.message.ifBlank { "音源测试失败" }
+                }
+            )
+        }
+    }
+
+    private fun updateSourceSettings(update: SourceSettingsState.() -> SourceSettingsState) {
+        val next = uiState.sourceSettings.update()
+        uiState = uiState.copy(sourceSettings = next)
+        sourceSettingsStore.save(next)
     }
 
     fun openPlaylist(playlist: MusicPlaylist) {
@@ -493,7 +782,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
             page.songs.isNotEmpty()
         ) {
             viewModelScope.launch {
-                player.playQueue(page.songs, startIndex.coerceIn(0, page.songs.lastIndex), registry)
+                player.playQueue(page.songs, startIndex.coerceIn(0, page.songs.lastIndex), playbackResolver())
             }
             return
         }
@@ -954,27 +1243,45 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
             searchHasMoreArtists = false,
             message = null
         )
-        val sourceId = uiState.selectedSourceId
+        val selectedSourceId = uiState.selectedSourceId
+        val sourceSettings = uiState.sourceSettings
+        val sourceId = effectiveSearchSourceId(selectedSourceId, sourceSettings)
+        val canSearchNeteaseCollections = sourceSettings.enabledSearchPlatformIds
+            .map(::normalizeBuiltInPlatformId)
+            .contains(SourcePlatformIds.NETEASE) &&
+            (sourceId == SourcePlatformIds.ALL || sourceId == SourcePlatformIds.NETEASE)
         val results = coroutineScope {
             val songs = async {
                 runCatching {
-                    musicRepository.searchSongs(sourceId, query, SEARCH_SONG_PAGE_SIZE, 0)
+                    musicRepository.searchSongs(sourceId, query, SEARCH_SONG_PAGE_SIZE, 0, sourceSettings)
                 }.getOrDefault(emptyList())
             }
             val playlists = async {
-                runCatching {
-                    musicRepository.searchPlaylists(sourceId, query, SEARCH_COLLECTION_PAGE_SIZE, 0)
-                }.getOrDefault(emptyList())
+                if (canSearchNeteaseCollections) {
+                    runCatching {
+                        musicRepository.searchPlaylists(SourcePlatformIds.NETEASE, query, SEARCH_COLLECTION_PAGE_SIZE, 0)
+                    }.getOrDefault(emptyList())
+                } else {
+                    emptyList()
+                }
             }
             val albums = async {
-                runCatching {
-                    musicRepository.searchAlbums(sourceId, query, SEARCH_COLLECTION_PAGE_SIZE, 0)
-                }.getOrDefault(emptyList())
+                if (canSearchNeteaseCollections) {
+                    runCatching {
+                        musicRepository.searchAlbums(SourcePlatformIds.NETEASE, query, SEARCH_COLLECTION_PAGE_SIZE, 0)
+                    }.getOrDefault(emptyList())
+                } else {
+                    emptyList()
+                }
             }
             val artists = async {
-                runCatching {
-                    musicRepository.searchArtists(sourceId, query, SEARCH_COLLECTION_PAGE_SIZE, 0)
-                }.getOrDefault(emptyList())
+                if (canSearchNeteaseCollections) {
+                    runCatching {
+                        musicRepository.searchArtists(SourcePlatformIds.NETEASE, query, SEARCH_COLLECTION_PAGE_SIZE, 0)
+                    }.getOrDefault(emptyList())
+                } else {
+                    emptyList()
+                }
             }
             SearchInitialResults(
                 songs = songs.await(),
@@ -983,7 +1290,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
                 artists = artists.await()
             )
         }
-        if (sourceId == uiState.selectedSourceId && query == uiState.searchQuery.trim()) {
+        if (selectedSourceId == uiState.selectedSourceId && query == uiState.searchQuery.trim()) {
             uiState = uiState.copy(
                 searchResults = results.songs,
                 searchPlaylists = results.playlists,
@@ -1018,7 +1325,13 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
             SearchResultKind.Artists -> uiState.searchHasMoreArtists
         }
         if (!hasMore) return
-        val sourceId = uiState.selectedSourceId
+        val selectedSourceId = uiState.selectedSourceId
+        val sourceSettings = uiState.sourceSettings
+        val sourceId = effectiveSearchSourceId(selectedSourceId, sourceSettings)
+        val canSearchNeteaseCollections = sourceSettings.enabledSearchPlatformIds
+            .map(::normalizeBuiltInPlatformId)
+            .contains(SourcePlatformIds.NETEASE) &&
+            (sourceId == SourcePlatformIds.ALL || sourceId == SourcePlatformIds.NETEASE)
         val offset = when (kind) {
             SearchResultKind.Songs -> uiState.searchResults.size
             SearchResultKind.Playlists -> uiState.searchPlaylists.size
@@ -1032,36 +1345,48 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
             when (kind) {
                 SearchResultKind.Songs -> {
                     nextSongs = runCatching {
-                        musicRepository.searchSongs(sourceId, query, SEARCH_SONG_PAGE_SIZE, offset)
+                        musicRepository.searchSongs(sourceId, query, SEARCH_SONG_PAGE_SIZE, offset, sourceSettings)
                     }.getOrDefault(emptyList())
                     nextPlaylists = emptyList()
                 }
                 SearchResultKind.Playlists -> {
                     nextSongs = emptyList()
-                    nextPlaylists = runCatching {
-                        musicRepository.searchPlaylists(sourceId, query, SEARCH_COLLECTION_PAGE_SIZE, offset)
-                    }.getOrDefault(emptyList())
+                    nextPlaylists = if (canSearchNeteaseCollections) {
+                        runCatching {
+                            musicRepository.searchPlaylists(SourcePlatformIds.NETEASE, query, SEARCH_COLLECTION_PAGE_SIZE, offset)
+                        }.getOrDefault(emptyList())
+                    } else {
+                        emptyList()
+                    }
                 }
                 SearchResultKind.Albums -> {
                     nextSongs = emptyList()
-                    nextPlaylists = runCatching {
-                        musicRepository.searchAlbums(sourceId, query, SEARCH_COLLECTION_PAGE_SIZE, offset)
-                    }.getOrDefault(emptyList())
+                    nextPlaylists = if (canSearchNeteaseCollections) {
+                        runCatching {
+                            musicRepository.searchAlbums(SourcePlatformIds.NETEASE, query, SEARCH_COLLECTION_PAGE_SIZE, offset)
+                        }.getOrDefault(emptyList())
+                    } else {
+                        emptyList()
+                    }
                 }
                 SearchResultKind.Artists -> {
                     nextSongs = emptyList()
-                    nextPlaylists = runCatching {
-                        musicRepository.searchArtists(sourceId, query, SEARCH_COLLECTION_PAGE_SIZE, offset)
-                    }.getOrDefault(emptyList())
+                    nextPlaylists = if (canSearchNeteaseCollections) {
+                        runCatching {
+                            musicRepository.searchArtists(SourcePlatformIds.NETEASE, query, SEARCH_COLLECTION_PAGE_SIZE, offset)
+                        }.getOrDefault(emptyList())
+                    } else {
+                        emptyList()
+                    }
                 }
             }
-            if (sourceId != uiState.selectedSourceId || query != uiState.searchQuery.trim()) {
+            if (selectedSourceId != uiState.selectedSourceId || query != uiState.searchQuery.trim()) {
                 uiState = uiState.copy(isLoadingMoreSearch = false)
                 return@launch
             }
             uiState = when (kind) {
                 SearchResultKind.Songs -> {
-                    val combined = (uiState.searchResults + nextSongs).distinctBy { it.id }
+                    val combined = (uiState.searchResults + nextSongs).distinctBy { "${it.sourceId}:${it.id}" }
                     uiState.copy(
                         searchResults = combined,
                         searchHasMoreSongs = nextSongs.size >= SEARCH_SONG_PAGE_SIZE,
@@ -1131,37 +1456,39 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
     }
 
     private fun loadPlayerComments(song: Song, force: Boolean) {
-        if (song.sourceId != "netease") {
-            uiState = uiState.copy(
-                playerComments = emptyList(),
-                playerCommentCount = 0,
-                isPlayerCommentsLoading = false,
-                playerCommentsMessage = "当前只支持网易云歌曲评论"
-            )
-            return
-        }
-        if (!force && loadedPlayerCommentSongId == song.id && uiState.playerComments.isNotEmpty()) return
+        val commentSongId = song.playerCommentCacheKey()
+        if (!force && loadedPlayerCommentSongId == commentSongId && uiState.playerComments.isNotEmpty()) return
         playerCommentsJob?.cancel()
         playerCommentsJob = viewModelScope.launch {
             val sort = uiState.playerCommentSort
-            loadedPlayerCommentSongId = song.id
+            loadedPlayerCommentSongId = commentSongId
             uiState = uiState.copy(
                 isPlayerCommentsLoading = true,
                 playerComments = if (force) emptyList() else uiState.playerComments,
                 playerCommentsMessage = null
             )
             val bundle = runCatching {
-                musicRepository.neteaseSongComments(song, sort)
+                musicRepository.songComments(song, sort, uiState.sourceSettings)
             }.getOrElse {
-                if (playbackState.currentSong?.id == song.id) {
+                if (playbackState.currentSong?.playerCommentCacheKey() == commentSongId) {
                     uiState = uiState.copy(
                         isPlayerCommentsLoading = false,
                         playerCommentsMessage = "歌曲评论加载失败：${it.message.orEmpty()}"
                     )
                 }
                 return@launch
+            } ?: run {
+                if (playbackState.currentSong?.playerCommentCacheKey() == commentSongId) {
+                    uiState = uiState.copy(
+                        playerComments = emptyList(),
+                        playerCommentCount = 0,
+                        isPlayerCommentsLoading = false,
+                        playerCommentsMessage = "当前歌曲没有启用可用的评论来源"
+                    )
+                }
+                return@launch
             }
-            if (playbackState.currentSong?.id == song.id) {
+            if (playbackState.currentSong?.playerCommentCacheKey() == commentSongId) {
                 uiState = uiState.copy(
                     playerComments = bundle.comments,
                     playerCommentCount = bundle.totalCount,
@@ -1225,7 +1552,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
                 }
             }
         }
-        if (loadedPlayerCommentSongId != song.id && playerCommentsJob?.isActive != true) {
+        if (loadedPlayerCommentSongId != song.playerCommentCacheKey() && playerCommentsJob?.isActive != true) {
             uiState = uiState.copy(
                 playerComments = emptyList(),
                 playerCommentCount = 0,
@@ -1272,6 +1599,26 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
             enabled = true,
             lyricText = activeLyric ?: song.artist.ifBlank { "SiListen" }
         )
+    }
+
+    private fun syncSleepTimerWithPlayback() {
+        val timer = uiState.sleepTimer
+        if (!timer.pendingStopAfterCurrentSong) return
+        val current = playbackState.currentSong
+        val duration = playbackState.durationMs.takeIf { it > 0L } ?: current?.durationMs ?: 0L
+        val reachedSongEnd = duration > 0L &&
+            playbackState.positionMs >= (duration - 1_200L).coerceAtLeast(0L) &&
+            !playbackState.isPlaying &&
+            !playbackState.isPreparing
+        if (current == null || reachedSongEnd) {
+            sleepTimerJob?.cancel()
+            sleepTimerJob = null
+            player.setStopAfterCurrentSongForTimer(false)
+            uiState = uiState.copy(
+                sleepTimer = SleepTimerState(),
+                message = "已在当前歌曲结束后停止播放"
+            )
+        }
     }
 
     private fun syncRecentPlayback() {
@@ -1359,9 +1706,15 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
                 playbackPreferences.getString("lyric_display_mode", LyricDisplayMode.Glass.name).orEmpty()
             )
         }.getOrDefault(LyricDisplayMode.Glass)
+        val playbackMode = runCatching {
+            PlaybackMode.valueOf(
+                playbackPreferences.getString("playback_mode", PlaybackMode.Order.name).orEmpty()
+            )
+        }.getOrDefault(PlaybackMode.Order)
         return PlaybackSettingsState(
             quality = quality,
             lyricDisplayMode = lyricDisplayMode,
+            playbackMode = playbackMode,
             statusBarLyricEnabled = playbackPreferences.getBoolean("status_bar_lyric", false)
         )
     }
@@ -1370,6 +1723,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         playbackPreferences.edit()
             .putString("quality", settings.quality.name)
             .putString("lyric_display_mode", settings.lyricDisplayMode.name)
+            .putString("playback_mode", settings.playbackMode.name)
             .putBoolean("status_bar_lyric", settings.statusBarLyricEnabled)
             .apply()
     }
@@ -1399,6 +1753,29 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         PlaybackQuality.valueOf(playbackPreferences.getString("quality", uiState.playbackSettings.quality.name).orEmpty())
     }.getOrDefault(PlaybackQuality.ExHigh)
 
+    private fun effectiveSearchSourceId(
+        selectedSourceId: String,
+        sourceSettings: SourceSettingsState = uiState.sourceSettings
+    ): String =
+        when {
+            selectedSourceId == SourcePlatformIds.LOCAL || selectedSourceId == SourcePlatformIds.DEMO ->
+                selectedSourceId
+            selectedSourceId == SourcePlatformIds.NETEASE &&
+                SourcePlatformIds.NETEASE !in sourceSettings.enabledSearchPlatformIds.map(::normalizeBuiltInPlatformId) ->
+                SourcePlatformIds.ALL
+            else ->
+                selectedSourceId
+        }
+
+    private fun rerunSearchIfNeeded() {
+        val query = uiState.searchQuery.trim()
+        if (query.isBlank()) return
+        searchJob?.cancel()
+        searchJob = viewModelScope.launch {
+            performSearch(query)
+        }
+    }
+
     fun playPlaylist(playlist: MusicPlaylist, startIndex: Int = 0) {
         viewModelScope.launch {
             val needsDetail = playlist.songs.isEmpty() &&
@@ -1414,9 +1791,39 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
                 uiState = uiState.copy(message = "${playable.title} 暂时没有可播放歌曲")
                 return@launch
             }
-            player.playQueue(playable.songs, startIndex, registry)
+            player.playQueue(playable.songs, startIndex, playbackResolver())
         }
     }
+
+    private fun Song.asNeteaseIdentitySong(): Song? {
+        val neteaseId = neteaseIdentityId() ?: return null
+        return copy(
+            id = neteaseId,
+            sourceId = SourcePlatformIds.NETEASE,
+            canonicalSourceId = SourcePlatformIds.NETEASE,
+            canonicalSongId = neteaseId,
+            providerIds = providerIds + (SourcePlatformIds.NETEASE to neteaseId)
+        )
+    }
+
+    private fun Song.playerCommentCacheKey(): String =
+        buildString {
+            append(sourceId)
+            append(':')
+            append(id)
+            canonicalSourceId?.let {
+                append(":canonical=")
+                append(it)
+                append(':')
+                append(canonicalSongId.orEmpty())
+            }
+            providerIds.toSortedMap().forEach { (key, value) ->
+                append(':')
+                append(key)
+                append('=')
+                append(value)
+            }
+        }
 
     private fun playbackQueueFor(song: Song): List<Song> =
         uiState.searchResults.takeIf { results -> results.any { it.id == song.id } }
@@ -1435,13 +1842,13 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         val queue = playbackQueueFor(song)
         val index = queue.indexOfFirst { it.id == song.id }.coerceAtLeast(0)
         viewModelScope.launch {
-            player.playQueue(queue, index, registry)
+            player.playQueue(queue, index, playbackResolver())
         }
     }
 
     fun playSongNext(song: Song) {
         viewModelScope.launch {
-            val queued = player.queueNext(song, registry)
+            val queued = player.queueNext(song, playbackResolver())
             uiState = uiState.copy(
                 message = if (queued) "已添加到下一首播放" else "暂时无法添加到下一首播放"
             )
@@ -1452,15 +1859,20 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         val queue = playbackQueueFor(song)
         val index = queue.indexOfFirst { it.id == song.id }.coerceAtLeast(0)
         viewModelScope.launch {
-            player.playQueue(queue, index, registry)
+            player.playQueue(queue, index, playbackResolver())
             playerSheetPanel = PlayerSheetPanel.Comments
             isPlayerSheetVisible = true
         }
     }
 
-    fun isSongLiked(song: Song): Boolean = song.id in uiState.likedSongIds
+    fun isSongLiked(song: Song): Boolean = song.neteaseIdentityId()?.let { it in uiState.likedSongIds } == true
 
-    fun isSongLikeLoading(song: Song): Boolean = song.id in uiState.songLikeLoadingIds
+    fun isSongLikeLoading(song: Song): Boolean {
+        val neteaseId = song.neteaseIdentityId()
+        val fallbackKey = "${song.sourceId}:${song.id}"
+        return (neteaseId != null && neteaseId in uiState.songLikeLoadingIds) ||
+            fallbackKey in uiState.songLikeLoadingIds
+    }
 
     fun toggleSongLike(song: Song) {
         setSongLike(song = song, shouldLike = !isSongLiked(song))
@@ -1504,18 +1916,28 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
 
     fun openAddToPlaylistChooser(song: Song? = uiState.likePrompt?.song ?: playbackState.currentSong) {
         val target = song ?: run {
-            uiState = uiState.copy(message = "当前没有可加入歌单的歌曲")
-            return
-        }
-        if (target.sourceId != "netease") {
-            uiState = uiState.copy(message = "当前歌曲暂不支持加入网易云歌单")
+            uiState = uiState.copy(message = "\u5f53\u524d\u6ca1\u6709\u53ef\u52a0\u5165\u6b4c\u5355\u7684\u6b4c\u66f2")
             return
         }
         if (!accountState.loginState.loggedIn) {
-            uiState = uiState.copy(message = "请先登录网易云账号后再加入歌单")
+            uiState = uiState.copy(message = "\u8bf7\u5148\u767b\u5f55\u7f51\u6613\u4e91\u8d26\u53f7\u540e\u518d\u52a0\u5165\u6b4c\u5355")
             return
         }
-        uiState = uiState.copy(playlistChooserSong = target)
+        val neteaseSong = target.asNeteaseIdentitySong()
+        if (neteaseSong == null) {
+            uiState = uiState.copy(message = "正在匹配网易云版本...")
+            viewModelScope.launch {
+                val matched = runCatching { musicRepository.matchNeteaseIdentity(target)?.asNeteaseIdentitySong() }
+                    .getOrNull()
+                uiState = if (matched == null) {
+                    uiState.copy(message = "\u5f53\u524d\u6b4c\u66f2\u672a\u5339\u914d\u5230\u7f51\u6613\u4e91\u7248\u672c\uff0c\u6682\u65f6\u4e0d\u80fd\u52a0\u5165\u7f51\u6613\u4e91\u6b4c\u5355")
+                } else {
+                    uiState.copy(playlistChooserSong = matched, message = null)
+                }
+            }
+            return
+        }
+        uiState = uiState.copy(playlistChooserSong = neteaseSong)
     }
 
     fun closeAddToPlaylistChooser() {
@@ -1529,16 +1951,17 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         playlist.id in uiState.playlistAddLoadingIds
 
     fun addPlaylistChooserSongToPlaylist(playlist: MusicPlaylist) {
-        val song = uiState.playlistChooserSong ?: playbackState.currentSong ?: run {
-            uiState = uiState.copy(message = "当前没有可加入歌单的歌曲")
+        val rawSong = uiState.playlistChooserSong ?: playbackState.currentSong ?: run {
+            uiState = uiState.copy(message = "\u5f53\u524d\u6ca1\u6709\u53ef\u52a0\u5165\u6b4c\u5355\u7684\u6b4c\u66f2")
             return
         }
-        if (song.sourceId != "netease" || playlist.kind != PlaylistKind.UserPlaylist) {
-            uiState = uiState.copy(message = "当前只支持加入网易云自建歌单")
+        val song = rawSong.asNeteaseIdentitySong()
+        if (song == null || playlist.kind != PlaylistKind.UserPlaylist) {
+            uiState = uiState.copy(message = "\u5f53\u524d\u53ea\u652f\u6301\u52a0\u5165\u7f51\u6613\u4e91\u81ea\u5efa\u6b4c\u5355")
             return
         }
         if (!accountState.loginState.loggedIn) {
-            uiState = uiState.copy(message = "请先登录网易云账号后再加入歌单")
+            uiState = uiState.copy(message = "\u8bf7\u5148\u767b\u5f55\u7f51\u6613\u4e91\u8d26\u53f7\u540e\u518d\u52a0\u5165\u6b4c\u5355")
             return
         }
         if (isPlaylistAddLoading(playlist)) return
@@ -1549,7 +1972,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
             }.getOrElse {
                 uiState = uiState.copy(
                     playlistAddLoadingIds = uiState.playlistAddLoadingIds - playlist.id,
-                    message = "加入歌单失败：${it.message.orEmpty()}"
+                    message = "\u52a0\u5165\u6b4c\u5355\u5931\u8d25\uff1a${it.message.orEmpty()}"
                 )
                 return@launch
             }
@@ -1575,50 +1998,69 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
     }
 
     private fun setSongLike(song: Song, shouldLike: Boolean) {
-        if (song.sourceId != "netease") {
-            uiState = uiState.copy(message = "当前只支持网易云歌曲红心")
-            return
-        }
         if (!accountState.loginState.loggedIn) {
-            uiState = uiState.copy(message = "请先登录网易云账号后再收藏歌曲")
+            uiState = uiState.copy(message = "\u8bf7\u5148\u767b\u5f55\u7f51\u6613\u4e91\u8d26\u53f7\u540e\u518d\u6536\u85cf\u6b4c\u66f2")
             return
         }
-        if (isSongLikeLoading(song)) return
-        val loadingIds = uiState.songLikeLoadingIds + song.id
-        uiState = uiState.copy(songLikeLoadingIds = loadingIds)
+        val initialNeteaseSong = song.asNeteaseIdentitySong()
+        val loadingKey = initialNeteaseSong?.id ?: "${song.sourceId}:${song.id}"
+        if (loadingKey in uiState.songLikeLoadingIds) return
+        uiState = uiState.copy(songLikeLoadingIds = uiState.songLikeLoadingIds + loadingKey)
         viewModelScope.launch {
+            val neteaseSong = initialNeteaseSong
+                ?: runCatching { musicRepository.matchNeteaseIdentity(song)?.asNeteaseIdentitySong() }.getOrNull()
+            if (neteaseSong == null) {
+                uiState = uiState.copy(
+                    songLikeLoadingIds = uiState.songLikeLoadingIds - loadingKey,
+                    message = "\u5f53\u524d\u6b4c\u66f2\u672a\u5339\u914d\u5230\u7f51\u6613\u4e91\u7248\u672c\uff0c\u6682\u65f6\u4e0d\u80fd\u7ea2\u5fc3"
+                )
+                return@launch
+            }
+            val songId = neteaseSong.id
             val result = runCatching {
-                musicRepository.neteaseToggleSongLike(song, shouldLike)
+                musicRepository.neteaseToggleSongLike(neteaseSong, shouldLike)
             }.getOrElse {
                 uiState = uiState.copy(
-                    songLikeLoadingIds = uiState.songLikeLoadingIds - song.id,
-                    message = "歌曲红心操作失败：${it.message.orEmpty()}"
+                    songLikeLoadingIds = uiState.songLikeLoadingIds - loadingKey - songId,
+                    message = "\u6b4c\u66f2\u7ea2\u5fc3\u64cd\u4f5c\u5931\u8d25\uff1a${it.message.orEmpty()}"
                 )
                 return@launch
             }
             val nextLikedIds = uiState.likedSongIds.toMutableSet().apply {
-                if (result.success && shouldLike) add(song.id)
-                if (result.success && !shouldLike) remove(song.id)
+                if (result.success && shouldLike) add(songId)
+                if (result.success && !shouldLike) remove(songId)
             }
             val nextLikedSongs = uiState.likedSongs?.let { liked ->
                 val nextSongs = liked.songs.toMutableList().apply {
-                    removeAll { it.id == song.id }
-                    if (result.success && shouldLike) add(0, song)
-                }.distinctBy { it.id }
+                    removeAll { it.neteaseIdentityId() == songId || it.id == songId }
+                    if (result.success && shouldLike) add(0, neteaseSong)
+                }.distinctBy { it.neteaseIdentityId() ?: it.id }
                 liked.copy(
                     songs = nextSongs,
                     coverUrl = nextSongs.firstOrNull()?.coverUrl ?: liked.coverUrl,
-                    subtitle = if (nextSongs.isEmpty()) liked.subtitle else "${nextSongs.size} 首喜欢的歌"
+                    subtitle = if (nextSongs.isEmpty()) liked.subtitle else "${nextSongs.size} \u9996\u559c\u6b22\u7684\u6b4c"
                 )
             }
             uiState = uiState.copy(
                 likedSongIds = nextLikedIds,
                 likedSongs = nextLikedSongs,
-                songLikeLoadingIds = uiState.songLikeLoadingIds - song.id,
+                searchResults = uiState.searchResults.replaceSongIdentityInSongs(song, neteaseSong),
+                featured = uiState.featured.replaceSongIdentityInPlaylists(song, neteaseSong),
+                dailyDiscovery = uiState.dailyDiscovery?.replaceSongIdentityInPlaylist(song, neteaseSong),
+                recommendedPlaylists = uiState.recommendedPlaylists.replaceSongIdentityInPlaylists(song, neteaseSong),
+                personalFm = uiState.personalFm?.replaceSongIdentityInPlaylist(song, neteaseSong),
+                podcasts = uiState.podcasts?.replaceSongIdentityInPlaylist(song, neteaseSong),
+                cloudDrive = uiState.cloudDrive?.replaceSongIdentityInPlaylist(song, neteaseSong),
+                userPlaylists = uiState.userPlaylists.replaceSongIdentityInPlaylists(song, neteaseSong),
+                selectedPlaylist = uiState.selectedPlaylist?.replaceSongIdentityInPlaylist(song, neteaseSong),
+                artistSongsPage = uiState.artistSongsPage.copy(
+                    songs = uiState.artistSongsPage.songs.replaceSongIdentityInSongs(song, neteaseSong)
+                ),
+                songLikeLoadingIds = uiState.songLikeLoadingIds - loadingKey - songId,
                 likePrompt = if (result.success && shouldLike) {
-                    LikePromptState(song, "已添加到我喜欢的音乐", showAddToPlaylistAction = true)
+                    LikePromptState(neteaseSong, "\u5df2\u6dfb\u52a0\u5230\u6211\u559c\u6b22\u7684\u97f3\u4e50", showAddToPlaylistAction = true)
                 } else if (result.success && !shouldLike) {
-                    LikePromptState(song, "已从我喜欢的音乐移除", showAddToPlaylistAction = false)
+                    LikePromptState(neteaseSong, "\u5df2\u4ece\u6211\u559c\u6b22\u7684\u97f3\u4e50\u79fb\u9664", showAddToPlaylistAction = false)
                 } else {
                     uiState.likePrompt
                 },
@@ -1636,6 +2078,61 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
     fun playQueueIndex(index: Int) = player.playAt(index)
 
     fun seekTo(positionMs: Long) = player.seekTo(positionMs)
+
+    fun startSleepTimer(durationMinutes: Int, waitUntilSongEnds: Boolean) {
+        val safeMinutes = durationMinutes.coerceIn(1, 360)
+        val totalMs = safeMinutes * 60_000L
+        sleepTimerJob?.cancel()
+        player.setStopAfterCurrentSongForTimer(false)
+        uiState = uiState.copy(
+            sleepTimer = SleepTimerState(
+                active = true,
+                durationMinutes = safeMinutes,
+                remainingMs = totalMs,
+                waitUntilSongEnds = waitUntilSongEnds
+            ),
+            message = "已设置 ${safeMinutes} 分钟后停止播放"
+        )
+        sleepTimerJob = viewModelScope.launch {
+            val endAt = SystemClock.elapsedRealtime() + totalMs
+            while (true) {
+                val remaining = (endAt - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
+                uiState = uiState.copy(
+                    sleepTimer = uiState.sleepTimer.copy(remainingMs = remaining)
+                )
+                if (remaining <= 0L) break
+                delay(1_000)
+            }
+            if (waitUntilSongEnds && playbackState.currentSong != null && playbackState.isPlaying) {
+                player.setStopAfterCurrentSongForTimer(true)
+                uiState = uiState.copy(
+                    sleepTimer = uiState.sleepTimer.copy(
+                        active = true,
+                        remainingMs = 0L,
+                        pendingStopAfterCurrentSong = true
+                    ),
+                    message = "将在当前歌曲播放完后停止"
+                )
+            } else {
+                player.pause()
+                player.setStopAfterCurrentSongForTimer(false)
+                uiState = uiState.copy(
+                    sleepTimer = SleepTimerState(),
+                    message = "已定时停止播放"
+                )
+            }
+        }
+    }
+
+    fun cancelSleepTimer(showMessage: Boolean = true) {
+        sleepTimerJob?.cancel()
+        sleepTimerJob = null
+        player.setStopAfterCurrentSongForTimer(false)
+        uiState = uiState.copy(
+            sleepTimer = SleepTimerState(),
+            message = if (showMessage) "已取消定时停止" else uiState.message
+        )
+    }
 
     fun openPlayerSheet(panel: PlayerSheetPanel = PlayerSheetPanel.Detail) {
         if (playbackState.currentSong != null) {
@@ -1737,6 +2234,21 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
     private fun List<MusicPlaylist>.replacePlaylist(detail: MusicPlaylist): List<MusicPlaylist> =
         map { playlist -> if (playlist.id == detail.id) detail else playlist }
 
+    private fun List<Song>.replaceSongIdentityInSongs(original: Song, resolved: Song): List<Song> =
+        map { song ->
+            if (song.sourceId == original.sourceId && song.id == original.id) {
+                resolved
+            } else {
+                song
+            }
+        }
+
+    private fun MusicPlaylist.replaceSongIdentityInPlaylist(original: Song, resolved: Song): MusicPlaylist =
+        copy(songs = songs.replaceSongIdentityInSongs(original, resolved))
+
+    private fun List<MusicPlaylist>.replaceSongIdentityInPlaylists(original: Song, resolved: Song): List<MusicPlaylist> =
+        map { playlist -> playlist.replaceSongIdentityInPlaylist(original, resolved) }
+
     private fun List<MusicPlaylist>.addSongToLoadedPlaylist(playlistId: String, song: Song): List<MusicPlaylist> =
         map { playlist -> if (playlist.id == playlistId) playlist.withAddedSongIfLoaded(song) else playlist }
 
@@ -1796,6 +2308,8 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         lyricJob?.cancel()
         libraryJob?.cancel()
         playerCommentsJob?.cancel()
+        sleepTimerJob?.cancel()
+        player.setStopAfterCurrentSongForTimer(false)
         super.onCleared()
     }
 }

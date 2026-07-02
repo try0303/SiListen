@@ -8,8 +8,31 @@ data class Song(
     val coverUrl: String,
     val durationMs: Long = 0L,
     val sourceId: String,
-    val streamHint: String? = null
+    val streamHint: String? = null,
+    val canonicalSourceId: String? = null,
+    val canonicalSongId: String? = null,
+    val playbackSourceId: String? = null,
+    val providerIds: Map<String, String> = emptyMap()
 )
+
+fun Song.neteaseIdentityId(): String? = when {
+    sourceId == SourcePlatformIds.NETEASE -> id
+    canonicalSourceId == SourcePlatformIds.NETEASE && !canonicalSongId.isNullOrBlank() -> canonicalSongId
+    else -> providerIds[SourcePlatformIds.NETEASE]
+}
+
+fun Song.withPlaybackSource(sourceId: String, matchedSongId: String): Song =
+    copy(
+        playbackSourceId = sourceId,
+        providerIds = providerIds + (sourceId to matchedSongId)
+    )
+
+fun Song.withCanonicalIdentity(sourceId: String, songId: String): Song =
+    copy(
+        canonicalSourceId = sourceId,
+        canonicalSongId = songId,
+        providerIds = providerIds + (sourceId to songId)
+    )
 
 data class MusicPlaylist(
     val id: String,

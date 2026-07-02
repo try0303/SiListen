@@ -17,6 +17,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
@@ -30,6 +31,16 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 
+enum class PlaybackMode(
+    val label: String,
+    val description: String
+) {
+    Order("顺序播放", "按当前列表顺序播放，播到列表末尾后停止"),
+    RepeatOne("单曲循环", "一直重复当前歌曲"),
+    Shuffle("随机播放", "从当前队列里随机播放歌曲"),
+    StopAtEnd("禁用歌曲切换", "当前歌曲播完后暂停，不自动进入下一首")
+}
+
 data class PlaybackState(
     val queue: List<Song> = emptyList(),
     val currentIndex: Int = 0,
@@ -39,8 +50,11 @@ data class PlaybackState(
     val durationMs: Long = 0L,
     val positionMs: Long = 0L,
     val bufferedMs: Long = 0L,
+    val playbackMode: PlaybackMode = PlaybackMode.Order,
     val errorMessage: String? = null
 )
+
+typealias PlaybackStreamResolver = suspend (Song) -> Pair<Song, String>?
 
 class PlayerController(context: Context) {
     private val appContext = context.applicationContext
@@ -120,6 +134,7 @@ class PlayerController(context: Context) {
     private var notificationDismissedByUser = false
     private var notificationLyricEnabled = false
     private var notificationLyricText: String? = null
+    private var stopAfterCurrentSongForTimer = false
 
     var state by mutableStateOf(PlaybackState())
         private set
@@ -166,6 +181,14 @@ class PlayerController(context: Context) {
         startIndex: Int,
         registry: MusicSourceRegistry
     ) {
+        playQueue(songs, startIndex) { song -> song.resolveWithRegistry(registry) }
+    }
+
+    suspend fun playQueue(
+        songs: List<Song>,
+        startIndex: Int,
+        resolver: PlaybackStreamResolver
+    ) {
         if (songs.isEmpty()) return
         val session = ++playSession
         val safeStartIndex = startIndex.coerceIn(0, songs.lastIndex)
@@ -186,7 +209,7 @@ class PlayerController(context: Context) {
         )
         notificationDismissedByUser = false
 
-        val firstPlayable = orderedSongs.firstNotNullOfOrNull { song -> song.toPlayable(registry) }
+        val firstPlayable = orderedSongs.firstNotNullOfOrNull { song -> song.toPlayable(resolver) }
             ?: run {
                 state = state.copy(
                     isPreparing = false,
@@ -207,12 +230,11 @@ class PlayerController(context: Context) {
         player.play()
         syncNotification()
 
-        val remainingPlayable = coroutineScope {
-            orderedSongs.drop(1)
-                .take(24)
-                .map { song -> async { song.toPlayable(registry) } }
-                .awaitAll()
-                .filterNotNull()
+        val remainingPlayable = buildList {
+            for (song in orderedSongs.drop(1).take(8)) {
+                if (session != playSession) return
+                song.toPlayable(resolver)?.let(::add)
+            }
         }
         if (session != playSession) return
         if (remainingPlayable.isEmpty()) return
@@ -223,31 +245,41 @@ class PlayerController(context: Context) {
         player.addMediaItems(remainingItems)
     }
 
-    private suspend fun Song.toPlayable(registry: MusicSourceRegistry): Pair<Song, MediaItem>? {
-        val streamUrl = streamHint?.takeIf { it.isNotBlank() }
-            ?: runCatching { registry.byId(sourceId).streamUrl(this) }.getOrNull()
-            ?: return null
+    private suspend fun Song.toPlayable(resolver: PlaybackStreamResolver): Pair<Song, MediaItem>? {
+        val (resolvedSong, streamUrl) = resolver(this) ?: return null
         if (streamUrl.isBlank()) return null
-        return this to MediaItem.Builder()
+        return resolvedSong to MediaItem.Builder()
             .setUri(streamUrl)
-            .setMediaId(id)
+            .setMediaId(resolvedSong.id)
             .setMediaMetadata(
                 MediaMetadata.Builder()
-                    .setTitle(title)
-                    .setArtist(artist)
-                    .setAlbumTitle(album)
-                    .setArtworkUri(coverUrl.takeIf { it.isNotBlank() }?.let(Uri::parse))
+                    .setTitle(resolvedSong.title)
+                    .setArtist(resolvedSong.artist)
+                    .setAlbumTitle(resolvedSong.album)
+                    .setArtworkUri(resolvedSong.coverUrl.takeIf { it.isNotBlank() }?.let(Uri::parse))
                     .build()
             )
             .build()
     }
 
+    private suspend fun Song.resolveWithRegistry(registry: MusicSourceRegistry): Pair<Song, String>? {
+        val streamUrl = streamHint?.takeIf { it.isNotBlank() }
+            ?: runCatching { registry.byId(sourceId).streamUrl(this) }.getOrNull()
+            ?: return null
+        if (streamUrl.isBlank()) return null
+        return this to streamUrl
+    }
+
     suspend fun queueNext(song: Song, registry: MusicSourceRegistry): Boolean {
+        return queueNext(song) { item -> item.resolveWithRegistry(registry) }
+    }
+
+    suspend fun queueNext(song: Song, resolver: PlaybackStreamResolver): Boolean {
         if (state.currentSong == null || player.mediaItemCount == 0) {
-            playQueue(listOf(song), 0, registry)
+            playQueue(listOf(song), 0, resolver)
             return state.currentSong?.id == song.id
         }
-        val playable = song.toPlayable(registry) ?: return false
+        val playable = song.toPlayable(resolver) ?: return false
         val insertIndex = (player.currentMediaItemIndex + 1)
             .coerceIn(0, state.queue.size)
         val nextQueue = state.queue.toMutableList().apply {
@@ -268,6 +300,25 @@ class PlayerController(context: Context) {
         }
         state = state.copy(isPlaying = player.isPlaying)
         syncNotification()
+    }
+
+    fun pause() {
+        player.pause()
+        state = state.copy(isPlaying = false, isPreparing = false)
+        syncNotification()
+    }
+
+    fun setPlaybackMode(mode: PlaybackMode) {
+        if (state.playbackMode == mode) return
+        state = state.copy(playbackMode = mode)
+        applyPlaybackMode()
+        syncNotification()
+    }
+
+    fun setStopAfterCurrentSongForTimer(enabled: Boolean) {
+        if (stopAfterCurrentSongForTimer == enabled) return
+        stopAfterCurrentSongForTimer = enabled
+        applyPlaybackMode()
     }
 
     fun next() {
@@ -375,6 +426,20 @@ class PlayerController(context: Context) {
                 )
             }
         }
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun applyPlaybackMode() {
+        player.repeatMode = when (state.playbackMode) {
+            PlaybackMode.RepeatOne -> Player.REPEAT_MODE_ONE
+            PlaybackMode.Shuffle -> Player.REPEAT_MODE_ALL
+            PlaybackMode.Order,
+            PlaybackMode.StopAtEnd -> Player.REPEAT_MODE_OFF
+        }
+        player.shuffleModeEnabled = state.playbackMode == PlaybackMode.Shuffle
+        player.setPauseAtEndOfMediaItems(
+            state.playbackMode == PlaybackMode.StopAtEnd || stopAfterCurrentSongForTimer
+        )
     }
 
     private fun updateSystemMediaSession(isLiked: Boolean) {

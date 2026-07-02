@@ -7,6 +7,7 @@ import com.silisten.app.data.model.MusicSourceInfo
 import com.silisten.app.data.model.PlaybackQuality
 import com.silisten.app.data.model.PlaylistComment
 import com.silisten.app.data.model.PlaylistCommentBundle
+import com.silisten.app.data.model.PlaylistCommentSort
 import com.silisten.app.data.model.PlaylistKind
 import com.silisten.app.data.model.Song
 import java.net.URLEncoder
@@ -22,7 +23,7 @@ import org.json.JSONObject
 class NeteaseMusicSource(
     private val apiClient: NeteaseApiClient,
     private val qualityProvider: () -> PlaybackQuality = { PlaybackQuality.ExHigh }
-) : MusicSource {
+) : MusicSource, PagedMusicSearchSource, SongCommentSource {
     override val info = MusicSourceInfo(
         id = "netease",
         name = "网易云音乐",
@@ -404,12 +405,12 @@ class NeteaseMusicSource(
         }
     }
 
-    override suspend fun search(keyword: String): List<Song> = searchSongs(keyword)
+    override suspend fun search(keyword: String): List<Song> = searchSongs(keyword, 30, 0)
 
-    suspend fun searchSongs(
+    override suspend fun searchSongs(
         keyword: String,
-        limit: Int = 30,
-        offset: Int = 0
+        limit: Int,
+        offset: Int
     ): List<Song> = withContext(Dispatchers.IO) {
         val query = keyword.trim().ifEmpty { "华语流行" }
         val safeLimit = limit.coerceIn(1, 60)
@@ -594,6 +595,16 @@ class NeteaseMusicSource(
         return items
     }
 
+    override suspend fun commentsForSong(
+        song: Song,
+        sort: PlaylistCommentSort,
+        limit: Int
+    ): PlaylistCommentBundle =
+        when (sort) {
+            PlaylistCommentSort.Hot -> hotSongComments(song, limit)
+            PlaylistCommentSort.Latest -> songComments(song, limit)
+        }
+
     private suspend fun officialStreamUrl(song: Song, quality: PlaybackQuality): String {
         val streamJson = runCatching {
             apiClient.getJson("/song/url/v1?id=${song.id}&level=${quality.neteaseLevel}&timestamp=${System.currentTimeMillis()}")
@@ -608,7 +619,7 @@ class NeteaseMusicSource(
             apiClient.getJson("/song/download/url?id=${song.id}&br=${quality.bitrate}&timestamp=${System.currentTimeMillis()}")
         }.getOrNull()
         val downloadUrl = downloadJson?.optJSONObject("data")?.optString("url").orEmpty()
-        return downloadUrl.ifBlank { "https://music.163.com/song/media/outer/url?id=${song.id}.mp3" }
+        return downloadUrl
     }
 
     private suspend fun songsByIds(ids: List<Long>): List<Song> {

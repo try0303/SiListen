@@ -366,7 +366,7 @@ fun HomeScreen(
                     liked = viewModel.isSongLiked(song),
                     likeLoading = viewModel.isSongLikeLoading(song),
                     onClick = { viewModel.playSong(song) },
-                    onLikeClick = if (song.sourceId == "netease") ({ viewModel.toggleSongLike(song) }) else null,
+                    onLikeClick = if (song.sourceId != "local") ({ viewModel.toggleSongLike(song) }) else null,
                     onMoreClick = { actionSong = song }
                 )
             }
@@ -612,7 +612,7 @@ fun SearchScreen(
                                     liked = viewModel.isSongLiked(song),
                                     likeLoading = viewModel.isSongLikeLoading(song),
                                     onClick = { viewModel.playSong(song) },
-                                    onLikeClick = if (song.sourceId == "netease") ({ viewModel.toggleSongLike(song) }) else null,
+                                    onLikeClick = if (song.sourceId != "local") ({ viewModel.toggleSongLike(song) }) else null,
                                     onMoreClick = { actionSong = song }
                                 )
                             }

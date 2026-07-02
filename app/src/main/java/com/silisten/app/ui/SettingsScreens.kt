@@ -1,4 +1,4 @@
-﻿package com.silisten.app.ui
+package com.silisten.app.ui
 
 import android.Manifest
 import android.content.ContentValues
@@ -64,6 +64,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -89,8 +90,11 @@ import androidx.compose.material.icons.rounded.AccountCircle
 import androidx.compose.material.icons.rounded.Album
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Cloud
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.Home
+import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Pause
@@ -102,9 +106,14 @@ import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material.icons.rounded.Subtitles
+import androidx.compose.material.icons.rounded.UploadFile
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -116,6 +125,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -215,10 +225,15 @@ import com.silisten.app.ThemeSettingsState
 import com.silisten.app.ThemeUiModeOption
 import com.silisten.app.data.model.LyricLine
 import com.silisten.app.data.model.MusicPlaylist
+import com.silisten.app.data.model.BuiltInCommentPlatforms
+import com.silisten.app.data.model.BuiltInSearchPlatforms
+import com.silisten.app.data.model.CustomPlaybackSourceType
+import com.silisten.app.data.model.CustomSourceConfig
 import com.silisten.app.data.model.PlaybackQuality
 import com.silisten.app.data.model.PlaylistComment
 import com.silisten.app.data.model.PlaylistCommentSort
 import com.silisten.app.data.model.PlaylistRoute
+import com.silisten.app.data.model.SourceSettingsState
 import com.silisten.app.data.model.Song
 import com.silisten.app.playback.PlaybackState
 import com.silisten.app.ui.kernelsu.KernelSuFloatingBottomBar
@@ -925,11 +940,56 @@ private fun SourceSettingsScreen(
     viewModel: SiListenViewModel,
     onBack: () -> Unit
 ) {
+    val settings = uiState.sourceSettings
     val dark = uiState.themeSettings.resolveDarkTheme()
     val pageColor = if (dark) Color(0xFF050805) else Color(0xFFF6F6F8)
-    val panelColor = if (dark) Color(0xFF121A14) else Color.White
+    val panelColor = if (dark) Color.White.copy(alpha = 0.08f) else Color.White
     val titleColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
     val mutedColor = if (dark) Color(0xFFAAC0B0) else Color(0xFF6A6D72)
+    var editingSource by remember { mutableStateOf<CustomSourceConfig?>(null) }
+    var showSourceManager by remember { mutableStateOf(false) }
+    var showOnlineImport by remember { mutableStateOf(false) }
+
+    editingSource?.let { source ->
+        CustomSourceEditorSheet(
+            initial = source,
+            dark = dark,
+            onDismiss = { editingSource = null },
+            onSave = {
+                viewModel.saveCustomSource(it)
+                editingSource = null
+            },
+            onTest = viewModel::testCustomSource
+        )
+    }
+    if (showSourceManager) {
+        CustomSourceManagerDialog(
+            settings = settings,
+            dark = dark,
+            titleColor = titleColor,
+            mutedColor = mutedColor,
+            onDismiss = { showSourceManager = false },
+            onLocalImport = viewModel::importCustomSourceFromScript,
+            onOnlineImport = { showOnlineImport = true },
+            onEdit = { editingSource = it },
+            onDelete = viewModel::deleteCustomSource,
+            onEnabledChange = viewModel::setCustomSourceEnabled,
+            onAllowUpdateAlertChange = viewModel::setCustomSourceAllowUpdateAlert
+        )
+    }
+    if (showOnlineImport) {
+        OnlineSourceImportDialog(
+            dark = dark,
+            titleColor = titleColor,
+            mutedColor = mutedColor,
+            onDismiss = { showOnlineImport = false },
+            onImport = { url ->
+                viewModel.importCustomSourceFromUrl(url)
+                showOnlineImport = false
+            }
+        )
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -943,57 +1003,709 @@ private fun SourceSettingsScreen(
                 Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回", tint = titleColor)
             }
             Text(
-                text = "音源与扩展",
+                text = "自定义音源",
                 color = titleColor,
                 style = MaterialTheme.typography.headlineMedium,
                 fontWeight = FontWeight.Black,
                 modifier = Modifier.padding(top = 6.dp)
             )
             Text(
-                text = "把默认音源和未来扩展入口统一收进设置，避免音乐库页信息过杂。",
+                text = "网易云继续负责评论、红心和歌单；播放地址优先交给你添加的脚本或接口解析。",
                 color = mutedColor,
                 style = MaterialTheme.typography.bodyMedium
             )
         }
-        items(viewModel.registry.all()) { source ->
-            Surface(
-                color = panelColor,
-                border = BorderStroke(1.dp, if (dark) Color.White.copy(alpha = 0.10f) else Color(0xFFECECEF)),
-                shape = RoundedCornerShape(20.dp),
-                modifier = Modifier.fillMaxWidth()
+
+        item {
+            SourceSettingsCard(
+                title = "自定义源优先",
+                subtitle = "启用后播放会先请求下方自定义音源，全部失败才回退网易云直链",
+                iconText = "换",
+                panelColor = panelColor,
+                titleColor = titleColor,
+                mutedColor = mutedColor,
+                dark = dark
             ) {
-                SourceRow(
-                    title = source.info.name,
-                    subtitle = source.info.description,
-                    badge = source.info.badge,
-                    accent = Color(source.info.accentHex.toInt()),
-                    selected = source.info.id == uiState.selectedSourceId,
+                SettingSwitchRow(
+                    title = "优先使用自定义音源播放",
+                    subtitle = "只替换播放 URL，歌曲身份仍保留网易云，评论、红心和歌单不受影响",
+                    checked = settings.autoSourceFallbackEnabled,
                     titleColor = titleColor,
-                    subtitleColor = mutedColor,
-                    onClick = { viewModel.selectSource(source.info.id) }
+                    mutedColor = mutedColor,
+                    onCheckedChange = viewModel::setAutoSourceFallbackEnabled
                 )
             }
         }
+
         item {
-            Surface(
-                color = panelColor,
-                border = BorderStroke(1.dp, if (dark) Color.White.copy(alpha = 0.10f) else Color(0xFFE7E7EA)),
-                shape = RoundedCornerShape(22.dp),
-                modifier = Modifier.fillMaxWidth()
+            SourceSettingsCard(
+                title = "平台搜索模块",
+                subtitle = "和 LX 一样，单曲搜索可以由多个平台模块共同参与；自定义音源只负责解析播放地址。",
+                iconText = "搜",
+                panelColor = panelColor,
+                titleColor = titleColor,
+                mutedColor = mutedColor,
+                dark = dark
             ) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Rounded.Cloud, contentDescription = null, tint = Color(0xFF8BD3FF))
-                        Spacer(Modifier.width(8.dp))
-                        Text("扩展音源", color = titleColor, fontWeight = FontWeight.Bold)
+                Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    BuiltInSearchPlatforms.forEach { platform ->
+                        SettingSwitchRow(
+                            title = "${platform.label}（${platform.lxId}）",
+                            subtitle = platform.description,
+                            checked = platform.id in settings.enabledSearchPlatformIds,
+                            titleColor = titleColor,
+                            mutedColor = mutedColor,
+                            onCheckedChange = { enabled ->
+                                viewModel.setSearchPlatformEnabled(platform.id, enabled)
+                            }
+                        )
                     }
+                }
+            }
+        }
+
+        item {
+            SourceSettingsCard(
+                title = "平台评论模块",
+                subtitle = "播放页评论会优先按歌曲自身平台读取，不再把所有歌曲都硬套到网易云评论。",
+                iconText = "评",
+                panelColor = panelColor,
+                titleColor = titleColor,
+                mutedColor = mutedColor,
+                dark = dark
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    BuiltInCommentPlatforms.forEach { platform ->
+                        SettingSwitchRow(
+                            title = "${platform.label}（${platform.lxId}）",
+                            subtitle = if (platform.id == "netease") {
+                                "网易云歌曲、红心、歌单收藏和账号歌单仍使用网易云身份。"
+                            } else {
+                                "${platform.label}歌曲会读取对应平台评论；红心和加入网易云歌单不会被强制绑定。"
+                            },
+                            checked = platform.id in settings.enabledCommentPlatformIds,
+                            titleColor = titleColor,
+                            mutedColor = mutedColor,
+                            onCheckedChange = { enabled ->
+                                viewModel.setCommentPlatformEnabled(platform.id, enabled)
+                            }
+                        )
+                    }
+                }
+            }
+        }
+
+        item {
+            SourceSettingsCard(
+                title = "自定义源管理（实验性）",
+                subtitle = "像 LX Music 一样导入脚本源，并显示版本、作者和更新提醒设置",
+                iconText = "API",
+                panelColor = panelColor,
+                titleColor = titleColor,
+                mutedColor = mutedColor,
+                dark = dark
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    if (settings.customSources.isEmpty()) {
+                        Text(
+                            "还没有自定义源。导入 LX 脚本后会优先参与播放地址解析。",
+                            color = mutedColor,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    } else {
+                        Text(
+                            settings.customSources.joinToString("、") { source ->
+                                source.displaySummaryName()
+                            },
+                            color = titleColor,
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                        Button(
+                            onClick = { showSourceManager = true },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                        ) {
+                            Text("自定义源管理")
+                        }
+                        Button(
+                            onClick = {
+                                editingSource = CustomSourceConfig(
+                                    id = "",
+                                    name = "直接播放接口",
+                                    endpoint = "",
+                                    enabled = true,
+                                    type = CustomPlaybackSourceType.DirectHttp
+                                )
+                            },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (dark) Color.White.copy(alpha = 0.12f) else Color(0xFFE9EAEE)
+                            )
+                        ) {
+                            Text("高级编辑", color = titleColor)
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            SourceSettingsCard(
+                title = "网易云账号能力",
+                subtitle = "评论、红心和加入歌单都继续走网易云账号体系",
+                iconText = "易",
+                panelColor = panelColor,
+                titleColor = titleColor,
+                mutedColor = mutedColor,
+                dark = dark
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    NeteaseAbilityRow("评论", "优先使用网易云 ID 展示歌曲评论，换源后仍保留评论入口", titleColor, mutedColor)
+                    NeteaseAbilityRow("喜欢与歌单", "红心、加入歌单、歌单收藏继续同步网易云", titleColor, mutedColor)
+                    NeteaseAbilityRow("身份桥接", "网易云 VIP 或灰色歌曲换源播放时，仍使用原网易云歌曲身份", titleColor, mutedColor)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SourceSettingsCard(
+    title: String,
+    subtitle: String,
+    iconText: String,
+    panelColor: Color,
+    titleColor: Color,
+    mutedColor: Color,
+    dark: Boolean,
+    content: @Composable () -> Unit
+) {
+    Surface(
+        color = panelColor,
+        border = BorderStroke(1.dp, if (dark) Color.White.copy(alpha = 0.10f) else Color(0xFFECECEF)),
+        shape = RoundedCornerShape(24.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(42.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = if (dark) 0.28f else 0.14f)),
+                    contentAlignment = Alignment.Center
+                ) {
                     Text(
-                        text = "接入 QQ 音乐、酷狗或自建网关时，新建一个音源实现推荐、搜索和播放地址解析，再注册到音源列表。",
+                        iconText,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Black,
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(title, color = titleColor, fontWeight = FontWeight.Black)
+                    Text(subtitle, color = mutedColor, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            content()
+        }
+    }
+}
+
+@Composable
+private fun SettingSwitchRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    titleColor: Color,
+    mutedColor: Color,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, color = titleColor, fontWeight = FontWeight.Bold)
+            Text(subtitle, color = mutedColor, style = MaterialTheme.typography.bodySmall)
+        }
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+@Composable
+private fun CustomSourceManagerDialog(
+    settings: SourceSettingsState,
+    dark: Boolean,
+    titleColor: Color,
+    mutedColor: Color,
+    onDismiss: () -> Unit,
+    onLocalImport: (String, String) -> Unit,
+    onOnlineImport: () -> Unit,
+    onEdit: (CustomSourceConfig) -> Unit,
+    onDelete: (String) -> Unit,
+    onEnabledChange: (String, Boolean) -> Unit,
+    onAllowUpdateAlertChange: (String, Boolean) -> Unit
+) {
+    val context = LocalContext.current
+    var importMenuExpanded by remember { mutableStateOf(false) }
+    val localImportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val fileName = uri.lastPathSegment.orEmpty().substringAfterLast('/')
+        val script = runCatching {
+            context.contentResolver.openInputStream(uri)
+                ?.bufferedReader(Charsets.UTF_8)
+                ?.use { it.readText() }
+                .orEmpty()
+        }.getOrDefault("")
+        onLocalImport(fileName, script)
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = if (dark) Color(0xFF101510) else Color.White,
+        titleContentColor = titleColor,
+        textContentColor = titleColor,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    "自定义源管理（实验性）",
+                    color = titleColor,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Black,
+                    modifier = Modifier.weight(1f)
+                )
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.Rounded.Close, contentDescription = "关闭", tint = mutedColor)
+                }
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                if (settings.customSources.isEmpty()) {
+                    Text(
+                        "这里还没有自定义源。导入 LX 音源脚本后，会显示名称、版本、作者和可用播放源。",
                         color = mutedColor,
                         style = MaterialTheme.typography.bodyMedium
                     )
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 360.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        items(settings.customSources, key = { it.id }) { source ->
+                            CustomSourceManagerRow(
+                                source = source,
+                                dark = dark,
+                                titleColor = titleColor,
+                                mutedColor = mutedColor,
+                                onEdit = { onEdit(source) },
+                                onDelete = { onDelete(source.id) },
+                                onEnabledChange = { enabled -> onEnabledChange(source.id, enabled) },
+                                onAllowUpdateAlertChange = { enabled ->
+                                    onAllowUpdateAlertChange(source.id, enabled)
+                                }
+                            )
+                        }
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("源编写说明：", color = titleColor, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        "LX 自定义源协议",
+                        color = MaterialTheme.colorScheme.primary,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Text(
+                    "提示：脚本运行环境已尽量隔离，但导入来源不明的脚本仍可能带来风险，请只导入你信任的源。",
+                    color = mutedColor,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        },
+        dismissButton = {
+            Button(
+                onClick = onDismiss,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (dark) Color.White.copy(alpha = 0.10f) else Color(0xFFEAF4EF)
+                )
+            ) {
+                Text("关闭", color = if (dark) Color(0xFFE8FFF0) else Color(0xFF23875B))
+            }
+        },
+        confirmButton = {
+            Box {
+                Button(onClick = { importMenuExpanded = true }) {
+                    Text("导入")
+                }
+                DropdownMenu(
+                    expanded = importMenuExpanded,
+                    onDismissRequest = { importMenuExpanded = false },
+                    containerColor = if (dark) Color(0xFF1A211B) else Color.White
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("本地导入", color = titleColor) },
+                        leadingIcon = { Icon(Icons.Rounded.UploadFile, contentDescription = null) },
+                        onClick = {
+                            importMenuExpanded = false
+                            localImportLauncher.launch(arrayOf("application/javascript", "text/javascript", "text/plain", "*/*"))
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("在线导入", color = titleColor) },
+                        leadingIcon = { Icon(Icons.Rounded.Link, contentDescription = null) },
+                        onClick = {
+                            importMenuExpanded = false
+                            onOnlineImport()
+                        }
+                    )
                 }
             }
+        }
+    )
+}
+
+@Composable
+private fun CustomSourceManagerRow(
+    source: CustomSourceConfig,
+    dark: Boolean,
+    titleColor: Color,
+    mutedColor: Color,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+    onEnabledChange: (Boolean) -> Unit,
+    onAllowUpdateAlertChange: (Boolean) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(if (dark) Color(0xFF1B261E) else Color(0xFFEAF8F1))
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    source.displaySummaryName(),
+                    color = titleColor,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Black
+                )
+                val meta = listOf(source.version.withVersionPrefix(), source.author)
+                    .filter { it.isNotBlank() }
+                    .joinToString("   ")
+                if (meta.isNotBlank()) {
+                    Text(meta, color = mutedColor, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            Switch(checked = source.enabled, onCheckedChange = onEnabledChange)
+            IconButton(onClick = onDelete) {
+                Icon(Icons.Rounded.Delete, contentDescription = "删除", tint = mutedColor)
+            }
+        }
+        if (source.description.isNotBlank()) {
+            Text(source.description, color = mutedColor, style = MaterialTheme.typography.bodySmall)
+        }
+        if (source.supportedSources.isNotEmpty()) {
+            Text(
+                "可用播放源：${source.supportedSources.joinToString("、")}",
+                color = mutedColor,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Checkbox(
+                checked = source.allowShowUpdateAlert,
+                onCheckedChange = onAllowUpdateAlertChange
+            )
+            Text(
+                "允许显示更新弹窗",
+                color = titleColor,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f)
+            )
+            TextButton(onClick = onEdit) {
+                Text("编辑")
+            }
+        }
+    }
+}
+
+@Composable
+private fun OnlineSourceImportDialog(
+    dark: Boolean,
+    titleColor: Color,
+    mutedColor: Color,
+    onDismiss: () -> Unit,
+    onImport: (String) -> Unit
+) {
+    var url by remember {
+        mutableStateOf("https://ghproxy.net/raw.githubusercontent.com/pdone/lx-music-source/main/lx/latest.js")
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = if (dark) Color(0xFF101510) else Color.White,
+        titleContentColor = titleColor,
+        textContentColor = titleColor,
+        title = { Text("在线导入", fontWeight = FontWeight.Black) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "粘贴 LX 自定义源脚本链接，SiListen 会下载脚本、识别源信息并加入管理列表。",
+                    color = mutedColor,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = { url = it },
+                    label = { Text("脚本链接") },
+                    singleLine = false,
+                    minLines = 2,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onImport(url) }) {
+                Text("导入")
+            }
+        }
+    )
+}
+
+private fun CustomSourceConfig.displaySummaryName(): String {
+    val versionLabel = version.withVersionPrefix()
+    return if (versionLabel.isBlank()) name else "$name  $versionLabel"
+}
+
+private fun String.withVersionPrefix(): String {
+    val clean = trim()
+    return when {
+        clean.isBlank() -> ""
+        clean.firstOrNull()?.isDigit() == true -> "v$clean"
+        else -> clean
+    }
+}
+
+@Composable
+private fun CustomSourceRow(
+    source: CustomSourceConfig,
+    titleColor: Color,
+    mutedColor: Color,
+    dark: Boolean,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+    onEnabledChange: (Boolean) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(if (dark) Color.White.copy(alpha = 0.05f) else Color(0xFFF4F5F7))
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(source.name, color = titleColor, fontWeight = FontWeight.Bold)
+                Text(source.endpoint, color = mutedColor, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Switch(checked = source.enabled, onCheckedChange = onEnabledChange)
+        }
+        Text(
+            text = source.type.label,
+            color = MaterialTheme.colorScheme.primary,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Bold
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = onEdit, contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp)) {
+                Text("编辑")
+            }
+            Button(onClick = onDelete, contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp)) {
+                Text("删除")
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CustomSourceEditorSheet(
+    initial: CustomSourceConfig,
+    dark: Boolean,
+    onDismiss: () -> Unit,
+    onSave: (CustomSourceConfig) -> Unit,
+    onTest: (CustomSourceConfig) -> Unit
+) {
+    var name by remember(initial.id) { mutableStateOf(initial.name) }
+    var endpoint by remember(initial.id) { mutableStateOf(initial.endpoint) }
+    var enabled by remember(initial.id) { mutableStateOf(initial.enabled) }
+    var type by remember(initial.id) { mutableStateOf(initial.type) }
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val titleColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
+    val mutedColor = if (dark) Color(0xFFAAC0B0) else Color(0xFF6A6D72)
+    val current = initial.copy(
+        name = name,
+        endpoint = endpoint,
+        enabled = enabled,
+        type = type
+    )
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = if (dark) Color(0xFF101510) else Color.White,
+        contentColor = titleColor
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Text(
+                if (initial.id.isBlank()) "新增自定义音源" else "编辑自定义音源",
+                color = titleColor,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Black
+            )
+            Text(
+                "LX 脚本按洛雪自定义源协议运行；直接播放接口会收到歌曲信息并返回 URL。",
+                color = mutedColor,
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Text("音源类型", color = titleColor, fontWeight = FontWeight.Bold)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                CustomPlaybackSourceType.values().forEach { option ->
+                    SourceTypeChip(
+                        type = option,
+                        selected = option == type,
+                        dark = dark,
+                        onClick = { type = option },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("音源名称") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedTextField(
+                value = endpoint,
+                onValueChange = { endpoint = it },
+                label = { Text(if (type == CustomPlaybackSourceType.LxScript) "LX 脚本地址" else "接口地址") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                modifier = Modifier.fillMaxWidth()
+            )
+            SettingSwitchRow(
+                title = "启用音源",
+                subtitle = "关闭后暂不参与自动换源",
+                checked = enabled,
+                titleColor = titleColor,
+                mutedColor = mutedColor,
+                onCheckedChange = { enabled = it }
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(
+                    onClick = { onTest(current) },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = if (dark) Color.White.copy(alpha = 0.12f) else Color(0xFFE9EAEE))
+                ) {
+                    Text("测试配置", color = titleColor)
+                }
+                Button(
+                    onClick = { onSave(current) },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("保存")
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+}
+
+@Composable
+private fun SourceTypeChip(
+    type: CustomPlaybackSourceType,
+    selected: Boolean,
+    dark: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val accent = MaterialTheme.colorScheme.primary
+    Surface(
+        color = when {
+            selected -> accent.copy(alpha = if (dark) 0.24f else 0.14f)
+            dark -> Color.White.copy(alpha = 0.06f)
+            else -> Color(0xFFF2F3F6)
+        },
+        border = BorderStroke(1.dp, if (selected) accent.copy(alpha = 0.75f) else Color.Transparent),
+        shape = RoundedCornerShape(18.dp),
+        modifier = modifier.noRippleClick(shape = RoundedCornerShape(18.dp), onClick = onClick)
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                type.label,
+                color = if (selected) accent else if (dark) Color(0xFFF3FFF5) else Color(0xFF111111),
+                fontWeight = FontWeight.Black,
+                style = MaterialTheme.typography.labelLarge
+            )
+            Text(
+                type.description,
+                color = if (dark) Color(0xFFAAC0B0) else Color(0xFF6A6D72),
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun NeteaseAbilityRow(
+    title: String,
+    subtitle: String,
+    titleColor: Color,
+    mutedColor: Color
+) {
+    Row(verticalAlignment = Alignment.Top) {
+        Text("✓", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Black)
+        Spacer(Modifier.width(8.dp))
+        Column {
+            Text(title, color = titleColor, fontWeight = FontWeight.Bold)
+            Text(subtitle, color = mutedColor, style = MaterialTheme.typography.bodySmall)
         }
     }
 }

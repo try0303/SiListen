@@ -87,6 +87,7 @@ import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AccountCircle
 import androidx.compose.material.icons.rounded.Album
+import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.Favorite
@@ -97,11 +98,16 @@ import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.Podcasts
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Radio
+import androidx.compose.material.icons.rounded.Repeat
+import androidx.compose.material.icons.rounded.RepeatOne
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material.icons.rounded.Subtitles
+import androidx.compose.material.icons.rounded.Timer
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -117,6 +123,7 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -206,6 +213,7 @@ import com.silisten.app.QrLoginUiState
 import com.silisten.app.SettingsRoute
 import com.silisten.app.SiListenUiState
 import com.silisten.app.SiListenViewModel
+import com.silisten.app.SleepTimerState
 import com.silisten.app.ThemeAccentOption
 import com.silisten.app.ThemeColorSpecOption
 import com.silisten.app.ThemeModeOption
@@ -219,6 +227,7 @@ import com.silisten.app.data.model.PlaylistComment
 import com.silisten.app.data.model.PlaylistCommentSort
 import com.silisten.app.data.model.PlaylistRoute
 import com.silisten.app.data.model.Song
+import com.silisten.app.playback.PlaybackMode
 import com.silisten.app.playback.PlaybackState
 import com.silisten.app.ui.kernelsu.KernelSuFloatingBottomBar
 import com.silisten.app.ui.kernelsu.LocalKernelSuFloatingBottomBarContentTint
@@ -727,12 +736,19 @@ private fun PlayerDetailPage(
     onPrevious: () -> Unit,
     onSeek: (Long) -> Unit,
     onToggleLike: (Song) -> Unit,
+    playbackMode: PlaybackMode,
+    sleepTimer: SleepTimerState,
+    onPlaybackModeChange: (PlaybackMode) -> Unit,
+    onStartSleepTimer: (Int, Boolean) -> Unit,
+    onCancelSleepTimer: () -> Unit,
     onArtworkClick: () -> Unit,
     artworkScale: Float,
     artworkAlpha: Float
 ) {
     val duration = playback.durationMs.coerceAtLeast(1L)
     val progress = playback.positionMs.coerceIn(0L, duration).toFloat()
+    var showPlaybackModeDialog by remember { mutableStateOf(false) }
+    var showSleepTimerDialog by remember { mutableStateOf(false) }
     val heartTint by animateColorAsState(
         targetValue = if (isLiked) Color(0xFFFF5C7C) else Color.White.copy(alpha = 0.82f),
         animationSpec = spring(dampingRatio = 0.72f, stiffness = 520f),
@@ -797,7 +813,7 @@ private fun PlayerDetailPage(
                     overflow = TextOverflow.Ellipsis
                 )
             }
-            if (song?.sourceId == "netease") {
+            if (song != null && song.sourceId != "local") {
                 Box(
                     modifier = Modifier
                         .size(46.dp)
@@ -887,7 +903,293 @@ private fun PlayerDetailPage(
                 )
             }
         }
+        Spacer(Modifier.height(18.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            PlayerOptionPill(
+                title = playbackMode.label,
+                subtitle = "播放模式",
+                icon = playbackMode.icon(),
+                modifier = Modifier.weight(1f),
+                onClick = { showPlaybackModeDialog = true }
+            )
+            PlayerOptionPill(
+                title = sleepTimer.title(),
+                subtitle = "定时停止",
+                icon = Icons.Rounded.Timer,
+                modifier = Modifier.weight(1f),
+                onClick = { showSleepTimerDialog = true }
+            )
+        }
         Spacer(Modifier.weight(0.1f))
+    }
+    if (showPlaybackModeDialog) {
+        PlaybackModeDialog(
+            selectedMode = playbackMode,
+            onDismiss = { showPlaybackModeDialog = false },
+            onModeSelected = { mode ->
+                onPlaybackModeChange(mode)
+                showPlaybackModeDialog = false
+            }
+        )
+    }
+    if (showSleepTimerDialog) {
+        SleepTimerDialog(
+            sleepTimer = sleepTimer,
+            onDismiss = { showSleepTimerDialog = false },
+            onStart = { minutes, waitUntilSongEnds ->
+                onStartSleepTimer(minutes, waitUntilSongEnds)
+                showSleepTimerDialog = false
+            },
+            onCancel = {
+                onCancelSleepTimer()
+                showSleepTimerDialog = false
+            }
+        )
+    }
+}
+
+@Composable
+private fun PlayerOptionPill(
+    title: String,
+    subtitle: String,
+    icon: ImageVector,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Surface(
+        color = Color.White.copy(alpha = 0.10f),
+        shape = RoundedCornerShape(20.dp),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)),
+        modifier = modifier.noRippleClick(shape = RoundedCornerShape(20.dp), onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    title,
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Black,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    subtitle,
+                    color = Color.White.copy(alpha = 0.58f),
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlaybackModeDialog(
+    selectedMode: PlaybackMode,
+    onDismiss: () -> Unit,
+    onModeSelected: (PlaybackMode) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF171717),
+        title = {
+            Text("播放模式", color = Color.White, fontWeight = FontWeight.Black)
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                PlaybackMode.values().forEach { mode ->
+                    val selected = mode == selectedMode
+                    Surface(
+                        color = if (selected) Color.White.copy(alpha = 0.18f) else Color.White.copy(alpha = 0.08f),
+                        shape = RoundedCornerShape(18.dp),
+                        border = BorderStroke(
+                            1.dp,
+                            if (selected) Color.White.copy(alpha = 0.32f) else Color.White.copy(alpha = 0.08f)
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .noRippleClick(shape = RoundedCornerShape(18.dp)) { onModeSelected(mode) }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Icon(
+                                mode.icon(),
+                                contentDescription = null,
+                                tint = if (selected) Color.White else Color.White.copy(alpha = 0.72f),
+                                modifier = Modifier.size(22.dp)
+                            )
+                            Column(Modifier.weight(1f)) {
+                                Text(mode.label, color = Color.White, fontWeight = FontWeight.Black)
+                                Text(
+                                    mode.description,
+                                    color = Color.White.copy(alpha = 0.58f),
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("完成", color = Color.White)
+            }
+        }
+    )
+}
+
+@Composable
+private fun SleepTimerDialog(
+    sleepTimer: SleepTimerState,
+    onDismiss: () -> Unit,
+    onStart: (Int, Boolean) -> Unit,
+    onCancel: () -> Unit
+) {
+    var selectedMinutes by remember(sleepTimer.durationMinutes) {
+        mutableIntStateOf(sleepTimer.durationMinutes.takeIf { it > 0 } ?: 30)
+    }
+    var customMinutesInput by remember(sleepTimer.durationMinutes) {
+        mutableStateOf((sleepTimer.durationMinutes.takeIf { it > 0 } ?: 30).toString())
+    }
+    var waitUntilSongEnds by remember(sleepTimer.waitUntilSongEnds) {
+        mutableStateOf(sleepTimer.waitUntilSongEnds)
+    }
+    val presets = listOf(15, 30, 60, 90)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF171717),
+        title = {
+            Text("定时停止播放", color = Color.White, fontWeight = FontWeight.Black)
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Text(
+                    text = if (sleepTimer.active) {
+                        if (sleepTimer.pendingStopAfterCurrentSong) {
+                            "当前状态：播完本首后停止"
+                        } else {
+                            "当前状态：剩余 ${formatSleepCountdown(sleepTimer.remainingMs)}"
+                        }
+                    } else {
+                        "选择倒计时，到点后自动暂停播放。"
+                    },
+                    color = Color.White.copy(alpha = 0.70f),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    items(presets) { minutes ->
+                        val selected = selectedMinutes == minutes
+                        Surface(
+                            color = if (selected) Color.White else Color.White.copy(alpha = 0.10f),
+                            shape = RoundedCornerShape(999.dp),
+                            modifier = Modifier.noRippleClick(shape = RoundedCornerShape(999.dp)) {
+                                selectedMinutes = minutes
+                                customMinutesInput = minutes.toString()
+                            }
+                        ) {
+                            Text(
+                                "${minutes} 分钟",
+                                color = if (selected) Color.Black else Color.White,
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Black,
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                            )
+                        }
+                    }
+                }
+                OutlinedTextField(
+                    value = customMinutesInput,
+                    onValueChange = { value ->
+                        customMinutesInput = value.filter { it.isDigit() }.take(3)
+                        customMinutesInput.toIntOrNull()?.let { selectedMinutes = it.coerceIn(1, 360) }
+                    },
+                    label = { Text("自定义分钟数") },
+                    supportingText = {
+                        Text(
+                            "支持 1 到 360 分钟",
+                            color = Color.White.copy(alpha = 0.48f)
+                        )
+                    },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("播完当前歌曲再停止", color = Color.White, fontWeight = FontWeight.Bold)
+                        Text(
+                            "倒计时结束后等待本首歌播放完再暂停。",
+                            color = Color.White.copy(alpha = 0.56f),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    Switch(
+                        checked = waitUntilSongEnds,
+                        onCheckedChange = { waitUntilSongEnds = it }
+                    )
+                }
+            }
+        },
+        dismissButton = {
+            if (sleepTimer.active) {
+                TextButton(onClick = onCancel) {
+                    Text("取消定时", color = Color.White.copy(alpha = 0.82f))
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val minutes = customMinutesInput.toIntOrNull()?.coerceIn(1, 360)
+                        ?: selectedMinutes.coerceIn(1, 360)
+                    onStart(minutes, waitUntilSongEnds)
+                }
+            ) {
+                Text("开始")
+            }
+        }
+    )
+}
+
+private fun PlaybackMode.icon(): ImageVector = when (this) {
+    PlaybackMode.Order -> Icons.Rounded.Repeat
+    PlaybackMode.RepeatOne -> Icons.Rounded.RepeatOne
+    PlaybackMode.Shuffle -> Icons.Rounded.Shuffle
+    PlaybackMode.StopAtEnd -> Icons.Rounded.Block
+}
+
+private fun SleepTimerState.title(): String = when {
+    pendingStopAfterCurrentSong -> "播完停止"
+    active && remainingMs > 0L -> formatSleepCountdown(remainingMs)
+    active -> "准备停止"
+    else -> "未设置"
+}
+
+private fun formatSleepCountdown(valueMs: Long): String {
+    val totalSeconds = (valueMs / 1_000L).coerceAtLeast(0L)
+    val hours = totalSeconds / 3_600L
+    val minutes = (totalSeconds % 3_600L) / 60L
+    val seconds = totalSeconds % 60L
+    return if (hours > 0L) {
+        String.format(Locale.getDefault(), "%d:%02d:%02d", hours, minutes, seconds)
+    } else {
+        String.format(Locale.getDefault(), "%02d:%02d", minutes, seconds)
     }
 }
 
@@ -907,12 +1209,16 @@ fun FullPlayer(
     isLiked: Boolean,
     isLikeLoading: Boolean,
     likePrompt: LikePromptState?,
+    sleepTimer: SleepTimerState,
     onToggle: () -> Unit,
     onNext: () -> Unit,
     onPrevious: () -> Unit,
     onPlayQueueIndex: (Int) -> Unit,
     onSeek: (Long) -> Unit,
     onToggleLike: (Song) -> Unit,
+    onPlaybackModeChange: (PlaybackMode) -> Unit,
+    onStartSleepTimer: (Int, Boolean) -> Unit,
+    onCancelSleepTimer: () -> Unit,
     onLikePromptAddToPlaylist: (Song) -> Unit,
     onDismissLikePrompt: (String) -> Unit,
     onPlayerCommentSortChange: (PlaylistCommentSort) -> Unit,
@@ -982,6 +1288,11 @@ fun FullPlayer(
                         onPrevious = onPrevious,
                         onSeek = onSeek,
                         onToggleLike = onToggleLike,
+                        playbackMode = playback.playbackMode,
+                        sleepTimer = sleepTimer,
+                        onPlaybackModeChange = onPlaybackModeChange,
+                        onStartSleepTimer = onStartSleepTimer,
+                        onCancelSleepTimer = onCancelSleepTimer,
                         onArtworkClick = {
                             val lyricsPage = playerPages.indexOf(PlayerPage.Lyrics).coerceAtLeast(0)
                             pagerScope.launch { pagerState.animateScrollToPage(lyricsPage) }
@@ -1834,7 +2145,7 @@ private fun GlassLyricsPanel(
                     )
                 }
                 Spacer(Modifier.width(6.dp))
-                if (song?.sourceId == "netease") {
+                if (song != null && song.sourceId != "local") {
                     IconButton(
                         onClick = { onToggleLike(song) },
                         modifier = Modifier
