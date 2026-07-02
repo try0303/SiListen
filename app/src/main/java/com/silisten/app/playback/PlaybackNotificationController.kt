@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.graphics.drawable.Icon
 import android.media.session.MediaSession.Token as MediaSessionToken
 import android.os.Build
@@ -28,6 +29,7 @@ internal class PlaybackNotificationController(
         playbackState: PlaybackState,
         mediaSessionToken: MediaSessionToken,
         isCurrentSongLiked: Boolean,
+        artwork: Bitmap? = null,
         contentTextOverride: String? = null
     ): Notification? {
         val song = playbackState.currentSong ?: run {
@@ -52,6 +54,7 @@ internal class PlaybackNotificationController(
             .setCategory(Notification.CATEGORY_TRANSPORT)
             .setPriority(Notification.PRIORITY_LOW)
             .setOngoing(playbackState.isPlaying)
+            .setLargeIcon(artwork)
             .addAction(appAction(
                 iconRes = if (isCurrentSongLiked) R.drawable.ic_favorite_24 else R.drawable.ic_favorite_border_24,
                 title = if (isCurrentSongLiked) "取消喜欢" else "喜欢",

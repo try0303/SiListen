@@ -738,6 +738,9 @@ private fun PlayerDetailPage(
     onToggleLike: (Song) -> Unit,
     playbackMode: PlaybackMode,
     sleepTimer: SleepTimerState,
+    lyrics: List<LyricLine>,
+    activeLyricIndex: Int,
+    isLyricLoading: Boolean,
     onPlaybackModeChange: (PlaybackMode) -> Unit,
     onStartSleepTimer: (Int, Boolean) -> Unit,
     onCancelSleepTimer: () -> Unit,
@@ -747,8 +750,15 @@ private fun PlayerDetailPage(
 ) {
     val duration = playback.durationMs.coerceAtLeast(1L)
     val progress = playback.positionMs.coerceIn(0L, duration).toFloat()
-    var showPlaybackModeDialog by remember { mutableStateOf(false) }
     var showSleepTimerDialog by remember { mutableStateOf(false) }
+    var modePrompt by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(modePrompt) {
+        val currentPrompt = modePrompt ?: return@LaunchedEffect
+        delay(1_300)
+        if (modePrompt == currentPrompt) {
+            modePrompt = null
+        }
+    }
     val heartTint by animateColorAsState(
         targetValue = if (isLiked) Color(0xFFFF5C7C) else Color.White.copy(alpha = 0.82f),
         animationSpec = spring(dampingRatio = 0.72f, stiffness = 520f),
@@ -759,181 +769,205 @@ private fun PlayerDetailPage(
         animationSpec = spring(dampingRatio = 0.62f, stiffness = 520f),
         label = "detail-heart-scale"
     )
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 28.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Spacer(Modifier.weight(0.08f))
-        Box(
+    Box(Modifier.fillMaxSize()) {
+        Column(
             modifier = Modifier
-                .fillMaxWidth(0.72f)
-                .aspectRatio(1f)
-                .graphicsLayer {
-                    scaleX = artworkScale
-                    scaleY = artworkScale
-                    alpha = artworkAlpha
-                },
-            contentAlignment = Alignment.Center
+                .fillMaxSize()
+                .padding(horizontal = 28.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            AsyncImage(
-                model = song?.coverUrl,
-                contentDescription = song?.title,
-                contentScale = ContentScale.Crop,
+            Spacer(Modifier.weight(0.08f))
+            Box(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .shadow(40.dp, RoundedCornerShape(18.dp), clip = false)
-                    .clip(RoundedCornerShape(18.dp))
-                    .background(Color(0xFF252525))
-                    .noRippleClick(shape = RoundedCornerShape(18.dp), onClick = onArtworkClick)
-            )
-        }
-        Spacer(Modifier.weight(0.06f))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = song?.title ?: "暂无播放",
-                    color = Color.White.copy(alpha = 0.94f),
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Black,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = song?.artist ?: "未知歌手",
-                    color = Color.White.copy(alpha = 0.60f),
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    .fillMaxWidth(0.72f)
+                    .aspectRatio(1f)
+                    .graphicsLayer {
+                        scaleX = artworkScale
+                        scaleY = artworkScale
+                        alpha = artworkAlpha
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                AsyncImage(
+                    model = song?.coverUrl,
+                    contentDescription = song?.title,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .shadow(40.dp, RoundedCornerShape(18.dp), clip = false)
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(Color(0xFF252525))
+                        .noRippleClick(shape = RoundedCornerShape(18.dp), onClick = onArtworkClick)
                 )
             }
-            if (song != null && song.sourceId != "local") {
-                Box(
-                    modifier = Modifier
-                        .size(46.dp)
-                        .clip(CircleShape)
-                        .background(Color.White.copy(alpha = 0.12f))
-                        .noRippleClick(shape = CircleShape) { onToggleLike(song) },
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (isLikeLoading) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(16.dp),
-                            strokeWidth = 1.8.dp,
-                            color = heartTint
-                        )
-                    } else {
-                        Icon(
-                            Icons.Rounded.Favorite,
-                            contentDescription = "喜欢",
-                            tint = heartTint,
-                            modifier = Modifier
-                                .size(22.dp)
-                                .graphicsLayer {
-                                    scaleX = heartScale
-                                    scaleY = heartScale
-                                }
-                        )
+            Spacer(Modifier.height(18.dp))
+            PlayerCoverLyricPreview(
+                lyrics = lyrics,
+                activeLyricIndex = activeLyricIndex,
+                isLoading = isLyricLoading,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(Modifier.height(18.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = song?.title ?: "暂无播放",
+                        color = Color.White.copy(alpha = 0.94f),
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Black,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = song?.artist ?: "未知歌手",
+                        color = Color.White.copy(alpha = 0.60f),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (song != null && song.sourceId != "local") {
+                    Box(
+                        modifier = Modifier
+                            .size(46.dp)
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.12f))
+                            .noRippleClick(shape = CircleShape) { onToggleLike(song) },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (isLikeLoading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 1.8.dp,
+                                color = heartTint
+                            )
+                        } else {
+                            Icon(
+                                Icons.Rounded.Favorite,
+                                contentDescription = "喜欢",
+                                tint = heartTint,
+                                modifier = Modifier
+                                    .size(22.dp)
+                                    .graphicsLayer {
+                                        scaleX = heartScale
+                                        scaleY = heartScale
+                                    }
+                            )
+                        }
                     }
                 }
             }
-        }
-        Spacer(Modifier.height(22.dp))
-        Slider(
-            value = progress,
-            onValueChange = { onSeek(it.toLong()) },
-            valueRange = 0f..duration.toFloat(),
-            colors = SliderDefaults.colors(
-                thumbColor = Color.White,
-                activeTrackColor = Color.White.copy(alpha = 0.92f),
-                inactiveTrackColor = Color.White.copy(alpha = 0.18f)
+            Spacer(Modifier.height(22.dp))
+            Slider(
+                value = progress,
+                onValueChange = { onSeek(it.toLong()) },
+                valueRange = 0f..duration.toFloat(),
+                colors = SliderDefaults.colors(
+                    thumbColor = Color.White,
+                    activeTrackColor = Color.White.copy(alpha = 0.92f),
+                    inactiveTrackColor = Color.White.copy(alpha = 0.18f)
+                )
             )
-        )
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(
-                formatTime(playback.positionMs),
-                color = Color.White.copy(alpha = 0.62f),
-                style = MaterialTheme.typography.labelSmall
-            )
-            Text(
-                formatTime(playback.durationMs),
-                color = Color.White.copy(alpha = 0.62f),
-                style = MaterialTheme.typography.labelSmall
-            )
-        }
-        Spacer(Modifier.height(16.dp))
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(24.dp)
-        ) {
-            IconButton(onClick = onPrevious, modifier = Modifier.size(62.dp)) {
-                Icon(
-                    Icons.Rounded.SkipPrevious,
-                    contentDescription = "上一首",
-                    tint = Color.White,
-                    modifier = Modifier.size(38.dp)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(
+                    formatTime(playback.positionMs),
+                    color = Color.White.copy(alpha = 0.62f),
+                    style = MaterialTheme.typography.labelSmall
+                )
+                Text(
+                    formatTime(playback.durationMs),
+                    color = Color.White.copy(alpha = 0.62f),
+                    style = MaterialTheme.typography.labelSmall
                 )
             }
-            IconButton(
-                onClick = onToggle,
-                modifier = Modifier
-                    .size(76.dp)
-                    .clip(CircleShape)
-                    .background(Color.White)
+            Spacer(Modifier.height(28.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Icon(
-                    if (playback.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                    contentDescription = "播放或暂停",
-                    tint = Color(0xFF111111),
-                    modifier = Modifier.size(42.dp)
+                PlayerCircleAction(
+                    icon = playbackMode.icon(),
+                    contentDescription = "播放模式",
+                    selected = playbackMode != PlaybackMode.Order,
+                    accent = accent,
+                    size = 44.dp,
+                    iconSize = 21.dp,
+                    onClick = {
+                        val nextMode = playbackMode.nextMode()
+                        onPlaybackModeChange(nextMode)
+                        modePrompt = "已切换为 ${nextMode.label}"
+                    }
+                )
+                IconButton(onClick = onPrevious, modifier = Modifier.size(56.dp)) {
+                    Icon(
+                        Icons.Rounded.SkipPrevious,
+                        contentDescription = "上一首",
+                        tint = Color.White,
+                        modifier = Modifier.size(34.dp)
+                    )
+                }
+                IconButton(
+                    onClick = onToggle,
+                    modifier = Modifier
+                        .size(72.dp)
+                        .clip(CircleShape)
+                        .background(Color.White)
+                ) {
+                    Icon(
+                        if (playback.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                        contentDescription = "播放或暂停",
+                        tint = Color(0xFF111111),
+                        modifier = Modifier.size(40.dp)
+                    )
+                }
+                IconButton(onClick = onNext, modifier = Modifier.size(56.dp)) {
+                    Icon(
+                        Icons.Rounded.SkipNext,
+                        contentDescription = "下一首",
+                        tint = Color.White,
+                        modifier = Modifier.size(34.dp)
+                    )
+                }
+                PlayerCircleAction(
+                    icon = Icons.Rounded.Timer,
+                    contentDescription = "定时停止",
+                    selected = sleepTimer.active,
+                    accent = accent,
+                    size = 44.dp,
+                    iconSize = 21.dp,
+                    onClick = { showSleepTimerDialog = true }
                 )
             }
-            IconButton(onClick = onNext, modifier = Modifier.size(62.dp)) {
-                Icon(
-                    Icons.Rounded.SkipNext,
-                    contentDescription = "下一首",
-                    tint = Color.White,
-                    modifier = Modifier.size(38.dp)
-                )
-            }
+            Spacer(Modifier.weight(0.1f))
         }
-        Spacer(Modifier.height(18.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        AnimatedVisibility(
+            visible = modePrompt != null,
+            enter = fadeIn(animationSpec = tween(140)),
+            exit = fadeOut(animationSpec = tween(180)),
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 18.dp)
         ) {
-            PlayerOptionPill(
-                title = playbackMode.label,
-                subtitle = "播放模式",
-                icon = playbackMode.icon(),
-                modifier = Modifier.weight(1f),
-                onClick = { showPlaybackModeDialog = true }
-            )
-            PlayerOptionPill(
-                title = sleepTimer.title(),
-                subtitle = "定时停止",
-                icon = Icons.Rounded.Timer,
-                modifier = Modifier.weight(1f),
-                onClick = { showSleepTimerDialog = true }
-            )
-        }
-        Spacer(Modifier.weight(0.1f))
-    }
-    if (showPlaybackModeDialog) {
-        PlaybackModeDialog(
-            selectedMode = playbackMode,
-            onDismiss = { showPlaybackModeDialog = false },
-            onModeSelected = { mode ->
-                onPlaybackModeChange(mode)
-                showPlaybackModeDialog = false
+            Surface(
+                color = Color.Black.copy(alpha = 0.42f),
+                shape = RoundedCornerShape(999.dp),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.16f))
+            ) {
+                Text(
+                    text = modePrompt.orEmpty(),
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Black,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 9.dp)
+                )
             }
-        )
+        }
     }
     if (showSleepTimerDialog) {
         SleepTimerDialog(
@@ -948,6 +982,107 @@ private fun PlayerDetailPage(
                 showSleepTimerDialog = false
             }
         )
+    }
+}
+
+@Composable
+private fun PlayerCoverLyricPreview(
+    lyrics: List<LyricLine>,
+    activeLyricIndex: Int,
+    isLoading: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val activeLine = lyrics.getOrNull(activeLyricIndex)
+        ?.text
+        ?.trim()
+        ?.takeIf { it.isNotBlank() }
+    val nextLine = lyrics.drop(activeLyricIndex + 1)
+        .firstOrNull { it.text.isNotBlank() }
+        ?.text
+        ?.trim()
+    val firstLine = when {
+        isLoading -> "歌词加载中..."
+        activeLine != null -> activeLine
+        lyrics.isEmpty() -> "暂无歌词"
+        else -> lyrics.firstOrNull { it.text.isNotBlank() }?.text?.trim().orEmpty()
+    }
+    val secondLine = when {
+        isLoading -> "稍等一下，正在同步当前歌曲"
+        nextLine != null -> nextLine
+        activeLine != null -> " "
+        else -> " "
+    }
+
+    Column(
+        modifier = modifier
+            .animateContentSize(animationSpec = spring(dampingRatio = 0.82f, stiffness = 260f))
+            .padding(horizontal = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Text(
+            text = firstLine,
+            color = Color.White.copy(alpha = if (activeLine != null) 0.90f else 0.54f),
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Black,
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Text(
+            text = secondLine,
+            color = Color.White.copy(alpha = 0.46f),
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
+}
+
+@Composable
+private fun PlayerCircleAction(
+    icon: ImageVector,
+    contentDescription: String,
+    selected: Boolean,
+    accent: Color,
+    size: Dp,
+    iconSize: Dp,
+    onClick: () -> Unit
+) {
+    val containerColor by animateColorAsState(
+        targetValue = if (selected) {
+            accent.copy(alpha = 0.24f)
+        } else {
+            Color.White.copy(alpha = 0.10f)
+        },
+        animationSpec = spring(dampingRatio = 0.78f, stiffness = 480f),
+        label = "player-circle-action-container"
+    )
+    val iconTint by animateColorAsState(
+        targetValue = if (selected) accent else Color.White.copy(alpha = 0.90f),
+        animationSpec = spring(dampingRatio = 0.78f, stiffness = 480f),
+        label = "player-circle-action-icon"
+    )
+    Surface(
+        color = containerColor,
+        shape = CircleShape,
+        border = BorderStroke(1.dp, Color.White.copy(alpha = if (selected) 0.20f else 0.12f)),
+        modifier = Modifier
+            .size(size)
+            .noRippleClick(shape = CircleShape, onClick = onClick)
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                icon,
+                contentDescription = contentDescription,
+                tint = iconTint,
+                modifier = Modifier.size(iconSize)
+            )
+        }
     }
 }
 
@@ -1174,6 +1309,13 @@ private fun PlaybackMode.icon(): ImageVector = when (this) {
     PlaybackMode.StopAtEnd -> Icons.Rounded.Block
 }
 
+private fun PlaybackMode.nextMode(): PlaybackMode = when (this) {
+    PlaybackMode.Order -> PlaybackMode.RepeatOne
+    PlaybackMode.RepeatOne -> PlaybackMode.Shuffle
+    PlaybackMode.Shuffle -> PlaybackMode.StopAtEnd
+    PlaybackMode.StopAtEnd -> PlaybackMode.Order
+}
+
 private fun SleepTimerState.title(): String = when {
     pendingStopAfterCurrentSong -> "播完停止"
     active && remainingMs > 0L -> formatSleepCountdown(remainingMs)
@@ -1290,6 +1432,9 @@ fun FullPlayer(
                         onToggleLike = onToggleLike,
                         playbackMode = playback.playbackMode,
                         sleepTimer = sleepTimer,
+                        lyrics = lyrics,
+                        activeLyricIndex = activeLyricIndex,
+                        isLyricLoading = isLyricLoading,
                         onPlaybackModeChange = onPlaybackModeChange,
                         onStartSleepTimer = onStartSleepTimer,
                         onCancelSleepTimer = onCancelSleepTimer,
