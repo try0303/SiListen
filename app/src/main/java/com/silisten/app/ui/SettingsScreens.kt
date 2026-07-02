@@ -2,6 +2,7 @@ package com.silisten.app.ui
 
 import android.Manifest
 import android.content.ContentValues
+import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -214,6 +215,7 @@ import com.silisten.app.LyricDisplayMode
 import com.silisten.app.PlaybackSettingsState
 import com.silisten.app.PlayerSheetPanel
 import com.silisten.app.QrLoginUiState
+import com.silisten.app.R
 import com.silisten.app.SettingsRoute
 import com.silisten.app.SiListenUiState
 import com.silisten.app.SiListenViewModel
@@ -300,7 +302,12 @@ fun SettingsScreen(
             onBack = viewModel::closeThemeSettings,
             onQualityChange = viewModel::selectPlaybackQuality,
             onLyricDisplayModeChange = viewModel::selectLyricDisplayMode,
-            onStatusBarLyricChange = viewModel::setStatusBarLyricEnabled
+            onStatusBarLyricChange = viewModel::setStatusBarLyricEnabled,
+            onDesktopLyricChange = viewModel::setDesktopLyricEnabled,
+            onStatusBarLyricOffsetChange = viewModel::setStatusBarLyricOffsetDp,
+            onStatusBarLyricHorizontalChange = viewModel::setStatusBarLyricHorizontalPercent,
+            onStatusBarLyricWidthChange = viewModel::setStatusBarLyricWidthPercent,
+            onStatusBarLyricColorChange = viewModel::setStatusBarLyricColorArgb
         )
         SettingsRoute.Source -> SourceSettingsScreen(
             uiState = uiState,
@@ -394,7 +401,7 @@ private fun SettingsHomeScreen(
         item {
             SettingsNavigationRow(
                 title = "赞赏开发者",
-                subtitle = "赞赏入口还没有设置，稍后可以在这里展示支持方式",
+                subtitle = "如果 SiListen 对你有帮助，可以在这里支持后续维护",
                 mark = "￥",
                 markColor = Color(0xFFFFC857),
                 cardColor = cardColor,
@@ -752,6 +759,11 @@ private fun DonationSettingsScreen(
     val panelColor = if (dark) Color.White.copy(alpha = 0.08f) else Color.White
     val titleColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
     val mutedColor = if (dark) Color(0xFFAAC0B0) else Color(0xFF6A6D72)
+    val context = LocalContext.current
+    val rewardBitmap: Bitmap? = remember(context) {
+        BitmapFactory.decodeResource(context.resources, R.drawable.mm_reward_qrcode)
+    }
+    val rewardImage = remember(rewardBitmap) { rewardBitmap?.asImageBitmap() }
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -772,7 +784,7 @@ private fun DonationSettingsScreen(
                 modifier = Modifier.padding(top = 6.dp)
             )
             Text(
-                text = "用于后续展示微信或支付宝收款码。",
+                text = "你的支持会用于 SiListen 的持续维护、功能优化和后续体验打磨。",
                 color = mutedColor,
                 style = MaterialTheme.typography.bodyMedium
             )
@@ -792,26 +804,41 @@ private fun DonationSettingsScreen(
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(190.dp)
+                            .size(246.dp)
                             .clip(RoundedCornerShape(28.dp))
-                            .background(
-                                Brush.linearGradient(
-                                    listOf(
-                                        Color(0xFF1ED760).copy(alpha = if (dark) 0.75f else 0.22f),
-                                        Color(0xFFFFC857).copy(alpha = if (dark) 0.46f else 0.22f),
-                                        Color(0xFF8BD3FF).copy(alpha = if (dark) 0.42f else 0.24f)
-                                    )
-                                )
-                            ),
+                            .background(Color.White),
                         contentAlignment = Alignment.Center
                     ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("暂未设置", color = titleColor, fontWeight = FontWeight.Black)
-                            Text("设置后会显示赞赏二维码", color = mutedColor, style = MaterialTheme.typography.bodySmall)
+                        if (rewardImage != null && rewardBitmap != null) {
+                            Image(
+                                bitmap = rewardImage,
+                                contentDescription = "微信赞赏二维码",
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(12.dp)
+                                    .pointerInput(rewardBitmap) {
+                                        detectTapGestures(
+                                            onLongPress = {
+                                                val saved = saveDonationBitmapToPictures(context, rewardBitmap)
+                                                Toast.makeText(
+                                                    context,
+                                                    if (saved) "赞赏码已保存到图片/相册" else "赞赏码保存失败，请稍后再试",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
+                                        )
+                                    }
+                            )
+                        } else {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("赞赏码加载失败", color = Color(0xFF111111), fontWeight = FontWeight.Black)
+                                Text("请稍后再试", color = Color(0xFF6A6D72), style = MaterialTheme.typography.bodySmall)
+                            }
                         }
                     }
                     Text(
-                        text = "把真实收款二维码放到资源目录后，这里会改成可直接展示的赞赏卡片。",
+                        text = "长按二维码可保存到相册，也可以使用微信扫码赞赏。感谢每一份鼓励与支持。",
                         color = mutedColor,
                         style = MaterialTheme.typography.bodyMedium
                     )
@@ -820,19 +847,48 @@ private fun DonationSettingsScreen(
         }
         item {
             ThemeSettingsGroup(containerColor = panelColor) {
-                ThemeToggleItem(
-                    title = "赞赏入口",
-                    subtitle = "设置页已提供入口，等待接入真实收款码素材",
-                    mark = "￥",
-                    checked = false,
-                    onCheckedChange = {},
-                    textColor = titleColor,
-                    mutedColor = mutedColor
-                )
+                Column(
+                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text("说明", color = titleColor, fontWeight = FontWeight.Bold)
+                    Text(
+                        "赞赏完全自愿，不影响应用的任何功能使用。你的反馈和使用本身同样是对项目很重要的支持。",
+                        color = mutedColor,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
             }
         }
 
     }
+}
+
+private fun saveDonationBitmapToPictures(context: Context, bitmap: Bitmap): Boolean {
+    val filename = "SiListen_Reward_${
+        SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+    }.png"
+    val values = ContentValues().apply {
+        put(MediaStore.Images.Media.DISPLAY_NAME, filename)
+        put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/SiListen")
+            put(MediaStore.Images.Media.IS_PENDING, 1)
+        }
+    }
+    return runCatching {
+        val resolver = context.contentResolver
+        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return false
+        resolver.openOutputStream(uri)?.use { output ->
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)
+        } ?: return false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            values.clear()
+            values.put(MediaStore.Images.Media.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+        }
+        true
+    }.getOrDefault(false)
 }
 
 @Composable
@@ -842,7 +898,12 @@ private fun PlaybackSettingsScreen(
     onBack: () -> Unit,
     onQualityChange: (PlaybackQuality) -> Unit,
     onLyricDisplayModeChange: (LyricDisplayMode) -> Unit,
-    onStatusBarLyricChange: (Boolean) -> Unit
+    onStatusBarLyricChange: (Boolean) -> Unit,
+    onDesktopLyricChange: (Boolean) -> Unit,
+    onStatusBarLyricOffsetChange: (Int) -> Unit,
+    onStatusBarLyricHorizontalChange: (Float) -> Unit,
+    onStatusBarLyricWidthChange: (Float) -> Unit,
+    onStatusBarLyricColorChange: (Long) -> Unit
 ) {
     val dark = themeSettings.resolveDarkTheme()
     val pageColor = if (dark) Color(0xFF050805) else Color(0xFFF6F6F8)
@@ -890,10 +951,62 @@ private fun PlaybackSettingsScreen(
             ThemeSettingsGroup(containerColor = panelColor) {
                 ThemeToggleRow(
                     title = "状态栏歌词",
-                    subtitle = "开启后，音乐通知副标题会显示当前歌词；关闭后显示歌手名。",
-                    mark = "词",
+                    subtitle = "在屏幕顶部显示一条透明歌词，需要悬浮窗权限。",
+                    mark = "顶",
                     checked = playbackSettings.statusBarLyricEnabled,
                     onCheckedChange = onStatusBarLyricChange,
+                    containerColor = panelColor,
+                    textColor = titleColor,
+                    mutedColor = mutedColor
+                )
+                AnimatedVisibility(visible = playbackSettings.statusBarLyricEnabled) {
+                    Column {
+                        ThemeDivider(dividerColor)
+                        StatusLyricSliderItem(
+                            title = "上下位置调节",
+                            subtitle = "距离屏幕顶部 ${playbackSettings.statusBarLyricOffsetDp}dp",
+                            value = playbackSettings.statusBarLyricOffsetDp.toFloat(),
+                            valueRange = 0f..120f,
+                            textColor = titleColor,
+                            mutedColor = mutedColor,
+                            onValueChange = { onStatusBarLyricOffsetChange(it.toInt()) }
+                        )
+                        ThemeDivider(dividerColor)
+                        StatusLyricSliderItem(
+                            title = "左右位置调节",
+                            subtitle = statusLyricHorizontalLabel(playbackSettings.statusBarLyricHorizontalPercent),
+                            value = playbackSettings.statusBarLyricHorizontalPercent,
+                            valueRange = -1f..1f,
+                            textColor = titleColor,
+                            mutedColor = mutedColor,
+                            onValueChange = onStatusBarLyricHorizontalChange
+                        )
+                        ThemeDivider(dividerColor)
+                        StatusLyricSliderItem(
+                            title = "宽度调节",
+                            subtitle = "${(playbackSettings.statusBarLyricWidthPercent * 100).toInt()}% 屏幕宽度，拖动时顶部会显示胶囊边框预览",
+                            value = playbackSettings.statusBarLyricWidthPercent,
+                            valueRange = 0.35f..1f,
+                            textColor = titleColor,
+                            mutedColor = mutedColor,
+                            onValueChange = onStatusBarLyricWidthChange
+                        )
+                        ThemeDivider(dividerColor)
+                        StatusLyricColorItem(
+                            selectedColor = playbackSettings.statusBarLyricColorArgb,
+                            textColor = titleColor,
+                            mutedColor = mutedColor,
+                            onColorChange = onStatusBarLyricColorChange
+                        )
+                    }
+                }
+                ThemeDivider(dividerColor)
+                ThemeToggleRow(
+                    title = "桌面歌词",
+                    subtitle = "在桌面和其他应用上方显示可拖动歌词胶囊，需要悬浮窗权限。",
+                    mark = "桌",
+                    checked = playbackSettings.desktopLyricEnabled,
+                    onCheckedChange = onDesktopLyricChange,
                     containerColor = panelColor,
                     textColor = titleColor,
                     mutedColor = mutedColor
@@ -1722,29 +1835,46 @@ private fun LyricDisplayModeItem(
         Text("歌词风格", color = textColor, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(4.dp))
         Text(
-            "Glass 参考 Apple Music 毛玻璃歌词，Particles 参考 Mineradio 的粒子化舞台氛围。",
+            "平滑式保留现在的 Apple Music 风格滚动，逐字式强调一个字一个字高亮，普通模式只显示干净歌词。",
             color = mutedColor,
             style = MaterialTheme.typography.bodySmall
         )
         Spacer(Modifier.height(14.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             LyricModeChip(
-                label = "Glass",
-                subtitle = "简洁毛玻璃",
+                label = "平滑式",
+                subtitle = "顺滑滚动",
                 selected = selectedMode == LyricDisplayMode.Glass,
                 dark = dark,
                 onClick = { onModeChange(LyricDisplayMode.Glass) },
                 modifier = Modifier.weight(1f)
             )
             LyricModeChip(
-                label = "Particles",
-                subtitle = "粒子舞台",
-                selected = selectedMode == LyricDisplayMode.Particles,
+                label = "逐字式",
+                subtitle = "逐字高亮",
+                selected = selectedMode == LyricDisplayMode.Word || selectedMode == LyricDisplayMode.Particles,
                 dark = dark,
-                onClick = { onModeChange(LyricDisplayMode.Particles) },
+                onClick = { onModeChange(LyricDisplayMode.Word) },
+                modifier = Modifier.weight(1f)
+            )
+            LyricModeChip(
+                label = "普通",
+                subtitle = "纯净歌词",
+                selected = selectedMode == LyricDisplayMode.Plain,
+                dark = dark,
+                onClick = { onModeChange(LyricDisplayMode.Plain) },
                 modifier = Modifier.weight(1f)
             )
         }
+    }
+}
+
+private fun statusLyricHorizontalLabel(value: Float): String {
+    val percent = kotlin.math.abs(value * 100).toInt()
+    return when {
+        value < -0.04f -> "向左偏移 $percent%"
+        value > 0.04f -> "向右偏移 $percent%"
+        else -> "居中显示"
     }
 }
 
@@ -1781,6 +1911,99 @@ private fun LyricModeChip(
                 color = if (dark) Color(0xFFAAC0B0) else Color(0xFF6A6D72),
                 style = MaterialTheme.typography.bodySmall
             )
+        }
+    }
+}
+
+@Composable
+private fun StatusLyricSliderItem(
+    title: String,
+    subtitle: String,
+    value: Float,
+    valueRange: ClosedFloatingPointRange<Float>,
+    textColor: Color,
+    mutedColor: Color,
+    onValueChange: (Float) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 18.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Column {
+            Text(title, color = textColor, fontWeight = FontWeight.Bold)
+            Text(subtitle, color = mutedColor, style = MaterialTheme.typography.bodySmall)
+        }
+        Slider(
+            value = value.coerceIn(valueRange.start, valueRange.endInclusive),
+            onValueChange = onValueChange,
+            valueRange = valueRange,
+            colors = SliderDefaults.colors(
+                thumbColor = MaterialTheme.colorScheme.primary,
+                activeTrackColor = MaterialTheme.colorScheme.primary,
+                inactiveTrackColor = mutedColor.copy(alpha = 0.18f)
+            )
+        )
+    }
+}
+
+@Composable
+private fun StatusLyricColorItem(
+    selectedColor: Long,
+    textColor: Color,
+    mutedColor: Color,
+    onColorChange: (Long) -> Unit
+) {
+    val options = listOf(
+        0xFFFFFFFFL to "白",
+        0xFF50C8FFL to "蓝",
+        0xFF7CFFB2L to "绿",
+        0xFFFF7FA4L to "粉",
+        0xFFFFD166L to "黄"
+    )
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 18.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Column {
+            Text("状态栏歌词颜色", color = textColor, fontWeight = FontWeight.Bold)
+            Text("选择顶部歌词的文字颜色。", color = mutedColor, style = MaterialTheme.typography.bodySmall)
+        }
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            items(options) { (argb, label) ->
+                val selected = selectedColor == argb
+                val color = Color(argb)
+                Surface(
+                    color = if (selected) color.copy(alpha = 0.20f) else mutedColor.copy(alpha = 0.10f),
+                    shape = RoundedCornerShape(999.dp),
+                    border = BorderStroke(1.dp, if (selected) color else Color.Transparent),
+                    modifier = Modifier.noRippleClick(RoundedCornerShape(999.dp)) {
+                        onColorChange(argb)
+                    }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(14.dp)
+                                .clip(CircleShape)
+                                .background(color)
+                        )
+                        Text(
+                            label,
+                            color = if (selected) color else textColor,
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                    }
+                }
+            }
         }
     }
 }

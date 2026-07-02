@@ -191,6 +191,8 @@ import androidx.compose.ui.util.fastRoundToInt
 import androidx.compose.ui.util.lerp
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
 import com.kyant.backdrop.backdrops.LayerBackdrop
 import com.kyant.backdrop.backdrops.layerBackdrop
@@ -735,6 +737,7 @@ private fun PlayerDetailPage(
     onNext: () -> Unit,
     onPrevious: () -> Unit,
     onSeek: (Long) -> Unit,
+    onRefreshLyrics: () -> Unit,
     onToggleLike: (Song) -> Unit,
     playbackMode: PlaybackMode,
     sleepTimer: SleepTimerState,
@@ -777,9 +780,10 @@ private fun PlayerDetailPage(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Spacer(Modifier.weight(0.08f))
+            Spacer(Modifier.height(20.dp))
             Box(
                 modifier = Modifier
-                    .fillMaxWidth(0.72f)
+                    .fillMaxWidth(0.82f)
                     .aspectRatio(1f)
                     .graphicsLayer {
                         scaleX = artworkScale
@@ -805,6 +809,7 @@ private fun PlayerDetailPage(
                 lyrics = lyrics,
                 activeLyricIndex = activeLyricIndex,
                 isLoading = isLyricLoading,
+                onRefreshLyrics = onRefreshLyrics,
                 modifier = Modifier.fillMaxWidth()
             )
             Spacer(Modifier.height(18.dp))
@@ -990,8 +995,10 @@ private fun PlayerCoverLyricPreview(
     lyrics: List<LyricLine>,
     activeLyricIndex: Int,
     isLoading: Boolean,
+    onRefreshLyrics: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val noLyricsAvailable = !isLoading && lyrics.isNoLyricsPlaceholder()
     val activeLine = lyrics.getOrNull(activeLyricIndex)
         ?.text
         ?.trim()
@@ -1003,6 +1010,7 @@ private fun PlayerCoverLyricPreview(
     val firstLine = when {
         isLoading -> "歌词加载中..."
         activeLine != null -> activeLine
+        noLyricsAvailable -> "暂无歌词"
         lyrics.isEmpty() -> "暂无歌词"
         else -> lyrics.firstOrNull { it.text.isNotBlank() }?.text?.trim().orEmpty()
     }
@@ -1020,16 +1028,36 @@ private fun PlayerCoverLyricPreview(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        Text(
-            text = firstLine,
-            color = Color.White.copy(alpha = if (activeLine != null) 0.90f else 0.54f),
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Black,
-            textAlign = TextAlign.Center,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.fillMaxWidth()
-        )
+        if (noLyricsAvailable) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = firstLine,
+                    color = Color.White.copy(alpha = 0.54f),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Black,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                TextButton(onClick = onRefreshLyrics) {
+                    Text("刷新歌词", color = Color.White.copy(alpha = 0.86f), fontWeight = FontWeight.Bold)
+                }
+            }
+        } else {
+            Text(
+                text = firstLine,
+                color = Color.White.copy(alpha = if (activeLine != null) 0.90f else 0.54f),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Black,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
         Text(
             text = secondLine,
             color = Color.White.copy(alpha = 0.46f),
@@ -1343,7 +1371,9 @@ fun FullPlayer(
     playerComments: List<PlaylistComment>,
     playerCommentSort: PlaylistCommentSort,
     playerCommentCount: Int,
+    playerCommentsHasMore: Boolean,
     isPlayerCommentsLoading: Boolean,
+    isLoadingMorePlayerComments: Boolean,
     playerCommentsMessage: String?,
     themeSettings: ThemeSettingsState,
     lyricDisplayMode: LyricDisplayMode,
@@ -1357,6 +1387,7 @@ fun FullPlayer(
     onPrevious: () -> Unit,
     onPlayQueueIndex: (Int) -> Unit,
     onSeek: (Long) -> Unit,
+    onRefreshLyrics: () -> Unit,
     onToggleLike: (Song) -> Unit,
     onPlaybackModeChange: (PlaybackMode) -> Unit,
     onStartSleepTimer: (Int, Boolean) -> Unit,
@@ -1364,7 +1395,8 @@ fun FullPlayer(
     onLikePromptAddToPlaylist: (Song) -> Unit,
     onDismissLikePrompt: (String) -> Unit,
     onPlayerCommentSortChange: (PlaylistCommentSort) -> Unit,
-    onRefreshPlayerComments: () -> Unit
+    onRefreshPlayerComments: () -> Unit,
+    onLoadMorePlayerComments: () -> Unit
 ) {
     val song = playback.currentSong
     val accent = themeSettings.accentColor()
@@ -1429,6 +1461,7 @@ fun FullPlayer(
                         onNext = onNext,
                         onPrevious = onPrevious,
                         onSeek = onSeek,
+                        onRefreshLyrics = onRefreshLyrics,
                         onToggleLike = onToggleLike,
                         playbackMode = playback.playbackMode,
                         sleepTimer = sleepTimer,
@@ -1463,8 +1496,55 @@ fun FullPlayer(
                             onToggle = onToggle,
                             onPrevious = onPrevious,
                             onNext = onNext,
+                            onRefreshLyrics = onRefreshLyrics,
                             accent = accent,
                             dark = true,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        LyricDisplayMode.Word -> GlassLyricsPanel(
+                            lyrics = lyrics,
+                            isLoading = isLyricLoading,
+                            playbackPositionMs = playback.positionMs,
+                            durationMs = duration,
+                            song = song,
+                            coverUrl = song?.coverUrl,
+                            songTitle = song?.title,
+                            songArtist = song?.artist,
+                            isLiked = isLiked,
+                            isLikeLoading = isLikeLoading,
+                            onSeek = onSeek,
+                            onToggleLike = onToggleLike,
+                            isPlaying = playback.isPlaying,
+                            onToggle = onToggle,
+                            onPrevious = onPrevious,
+                            onNext = onNext,
+                            onRefreshLyrics = onRefreshLyrics,
+                            accent = accent,
+                            dark = true,
+                            wordByWord = true,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        LyricDisplayMode.Plain -> GlassLyricsPanel(
+                            lyrics = lyrics,
+                            isLoading = isLyricLoading,
+                            playbackPositionMs = playback.positionMs,
+                            durationMs = duration,
+                            song = song,
+                            coverUrl = song?.coverUrl,
+                            songTitle = song?.title,
+                            songArtist = song?.artist,
+                            isLiked = isLiked,
+                            isLikeLoading = isLikeLoading,
+                            onSeek = onSeek,
+                            onToggleLike = onToggleLike,
+                            isPlaying = playback.isPlaying,
+                            onToggle = onToggle,
+                            onPrevious = onPrevious,
+                            onNext = onNext,
+                            onRefreshLyrics = onRefreshLyrics,
+                            accent = accent,
+                            dark = true,
+                            plain = true,
                             modifier = Modifier.fillMaxSize()
                         )
                         LyricDisplayMode.Particles -> ParticleLyricsPanel(
@@ -1472,6 +1552,7 @@ fun FullPlayer(
                             activeIndex = activeLyricIndex,
                             isLoading = isLyricLoading,
                             playbackPositionMs = playback.positionMs,
+                            onRefreshLyrics = onRefreshLyrics,
                             accent = accent,
                             modifier = Modifier.fillMaxSize()
                         )
@@ -1487,12 +1568,15 @@ fun FullPlayer(
                         comments = playerComments,
                         commentSort = playerCommentSort,
                         commentCount = playerCommentCount,
+                        hasMore = playerCommentsHasMore,
                         isLoading = isPlayerCommentsLoading,
+                        isLoadingMore = isLoadingMorePlayerComments,
                         message = playerCommentsMessage,
                         dark = true,
                         accent = accent,
                         onSortChange = onPlayerCommentSortChange,
-                        onRefresh = onRefreshPlayerComments
+                        onRefresh = onRefreshPlayerComments,
+                        onLoadMore = onLoadMorePlayerComments
                     )
                 }
             }
@@ -1858,15 +1942,29 @@ private fun PlayerCommentsPanel(
     comments: List<PlaylistComment>,
     commentSort: PlaylistCommentSort,
     commentCount: Int,
+    hasMore: Boolean,
     isLoading: Boolean,
+    isLoadingMore: Boolean,
     message: String?,
     dark: Boolean,
     accent: Color,
     onSortChange: (PlaylistCommentSort) -> Unit,
-    onRefresh: () -> Unit
+    onRefresh: () -> Unit,
+    onLoadMore: () -> Unit
 ) {
     val sortTitle = if (commentSort == PlaylistCommentSort.Hot) "热门评论" else "最新评论"
+    val listState = rememberLazyListState()
+    LaunchedEffect(listState, comments.size, hasMore, isLoadingMore, isLoading) {
+        snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }
+            .collect { lastVisibleIndex ->
+                val totalItems = listState.layoutInfo.totalItemsCount
+                if (hasMore && !isLoadingMore && !isLoading && totalItems > 0 && lastVisibleIndex >= totalItems - 4) {
+                    onLoadMore()
+                }
+            }
+    }
     LazyColumn(
+        state = listState,
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 14.dp, vertical = 10.dp),
@@ -1967,12 +2065,30 @@ private fun PlayerCommentsPanel(
                 )
             }
         }
-        items(comments) { comment ->
+        items(comments, key = { it.id }) { comment ->
             PlayerCommentFlowRow(
                 comment = comment,
                 dark = dark,
                 accent = accent
             )
+        }
+        item {
+            when {
+                isLoadingMore -> LoadingStateCard(text = "正在加载更多评论...", dark = dark)
+                hasMore -> PlaylistActionChip(
+                    text = "加载更多评论",
+                    dark = dark,
+                    selected = false,
+                    onClick = onLoadMore
+                )
+                comments.isNotEmpty() -> Text(
+                    text = "没有更多评论了",
+                    color = if (dark) Color.White.copy(alpha = 0.42f) else Color(0xFF8A8F96),
+                    style = MaterialTheme.typography.bodySmall,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
         }
     }
 }
@@ -1985,10 +2101,12 @@ private fun PlayerCommentFlowRow(
 ) {
     val titleColor = if (dark) Color.White.copy(alpha = 0.94f) else Color(0xFF171717)
     val mutedText = if (dark) Color.White.copy(alpha = 0.48f) else Color(0xFF83878D)
+    var repliesExpanded by remember(comment.id) { mutableStateOf(false) }
+    var previewImageUrl by remember(comment.id) { mutableStateOf<String?>(null) }
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 2.dp),
+            .padding(vertical = 4.dp),
         verticalAlignment = Alignment.Top
     ) {
         AsyncImage(
@@ -2003,58 +2121,165 @@ private fun PlayerCommentFlowRow(
         Spacer(Modifier.width(14.dp))
         Column(
             modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(7.dp)
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(verticalAlignment = Alignment.Top) {
                 Text(
                     text = comment.authorName,
-                    color = titleColor,
+                    color = if (dark) Color.White.copy(alpha = 0.74f) else Color(0xFF666A70),
                     style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
+                    fontWeight = FontWeight.Black,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false)
+                    modifier = Modifier.weight(1f)
                 )
-                if (comment.timeLabel.isNotBlank()) {
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        text = comment.timeLabel,
-                        color = mutedText,
-                        style = MaterialTheme.typography.bodySmall,
-                        maxLines = 1
-                    )
-                }
+            }
+            if (comment.timeLabel.isNotBlank() || comment.likedCount > 0) {
+                Text(
+                    text = buildList {
+                        if (comment.timeLabel.isNotBlank()) add(comment.timeLabel)
+                        if (comment.likedCount > 0) add("${formatCommentCount(comment.likedCount)} 赞")
+                    }.joinToString(" · "),
+                    color = mutedText,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1
+                )
             }
             Text(
                 text = comment.content,
                 color = titleColor,
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.SemiBold,
-                lineHeight = MaterialTheme.typography.bodyLarge.lineHeight * 1.08f
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Black,
+                lineHeight = MaterialTheme.typography.titleMedium.lineHeight * 1.15f
             )
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(14.dp)
+            if (comment.images.isNotEmpty()) {
+                PlayerCommentImages(
+                    comment = comment,
+                    dark = dark,
+                    onPreview = { previewImageUrl = it }
+                )
+            }
+            if (comment.replyCount > 0 || comment.replies.isNotEmpty()) {
+                PlayerCommentReplies(
+                    comment = comment,
+                    expanded = repliesExpanded,
+                    dark = dark,
+                    accent = accent,
+                    onToggle = { repliesExpanded = !repliesExpanded }
+                )
+            }
+        }
+    }
+    previewImageUrl?.let { imageUrl ->
+        Dialog(
+            onDismissRequest = { previewImageUrl = null },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.86f))
+                    .noRippleClick(shape = RoundedCornerShape(0.dp)) { previewImageUrl = null },
+                contentAlignment = Alignment.Center
             ) {
-                if (comment.replyCount > 0) {
+                AsyncImage(
+                    model = imageUrl,
+                    contentDescription = "评论图片",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlayerCommentImages(
+    comment: PlaylistComment,
+    dark: Boolean,
+    onPreview: (String) -> Unit
+) {
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        items(comment.images, key = { it.url }) { image ->
+            AsyncImage(
+                model = image.url,
+                contentDescription = "评论图片",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .size(96.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(if (dark) Color.White.copy(alpha = 0.08f) else Color.Black.copy(alpha = 0.05f))
+                    .noRippleClick(shape = RoundedCornerShape(16.dp)) { onPreview(image.url) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun PlayerCommentReplies(
+    comment: PlaylistComment,
+    expanded: Boolean,
+    dark: Boolean,
+    accent: Color,
+    onToggle: () -> Unit
+) {
+    val mutedText = if (dark) Color.White.copy(alpha = 0.52f) else Color(0xFF73777F)
+    val titleColor = if (dark) Color.White.copy(alpha = 0.88f) else Color(0xFF202124)
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            text = if (expanded) "收起回复" else "展开更多回复",
+            color = accent,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.Black,
+            modifier = Modifier.noRippleClick(RoundedCornerShape(6.dp), onClick = onToggle)
+        )
+        AnimatedVisibility(visible = expanded) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(if (dark) Color.White.copy(alpha = 0.06f) else Color(0xFFF4F6F8))
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(9.dp)
+            ) {
+                comment.replies.forEach { reply ->
+                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text(
+                            text = reply.authorName,
+                            color = mutedText,
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Black,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = reply.content,
+                            color = titleColor,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+                val missingCount = (comment.replyCount - comment.replies.size).coerceAtLeast(0)
+                if (missingCount > 0) {
                     Text(
-                        text = "${comment.replyCount} 条回复 >",
+                        text = "还有 $missingCount 条回复暂未加载",
                         color = accent,
                         style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.Black
                     )
                 }
-                if (comment.likedCount > 0) {
-                    Text(
-                        text = "${comment.likedCount} 赞",
-                        color = mutedText,
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
             }
         }
     }
+}
+
+private fun formatCommentCount(value: Int): String = when {
+    value >= 10_000 -> "${String.format(Locale.getDefault(), "%.1f", value / 10_000f).removeSuffix(".0")}万"
+    else -> value.toString()
 }
 
 @Composable
@@ -2186,10 +2411,14 @@ private fun GlassLyricsPanel(
     onToggle: () -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
+    onRefreshLyrics: () -> Unit,
     accent: Color,
     dark: Boolean,
+    wordByWord: Boolean = false,
+    plain: Boolean = false,
     modifier: Modifier = Modifier
 ) {
+    val noLyricsAvailable = !isLoading && lyrics.isNoLyricsPlaceholder()
     val lyricItems = remember(lyrics, isLoading) {
         if (isLoading) {
             listOf(LyricLine(0L, "歌词加载中..."))
@@ -2423,6 +2652,7 @@ private fun GlassLyricsPanel(
                     animationSpec = spring(dampingRatio = 0.76f, stiffness = 260f),
                     label = "apple-lyric-scale"
                 )
+                val displayProgress = if (wordByWord) steppedLyricProgress(line.text, karaokeProgress) else karaokeProgress
                 val lineClickInteraction = remember(line.timeMs, index) { MutableInteractionSource() }
                 Column(
                     modifier = Modifier
@@ -2441,20 +2671,45 @@ private fun GlassLyricsPanel(
                         },
                     horizontalAlignment = Alignment.Start
                 ) {
-                    AppleMusicLyricLineText(
-                        text = line.text.trim().ifBlank { " " },
-                        active = isActive,
-                        progress = karaokeProgress,
-                        accent = accent
-                    )
+                    if (noLyricsAvailable && index == 0) {
+                        NoLyricsRefreshInline(
+                            dark = true,
+                            onRefreshLyrics = onRefreshLyrics,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    } else if (plain) {
+                        PlainLyricLineText(
+                            text = line.text.trim().ifBlank { " " },
+                            active = isActive,
+                            textAlign = TextAlign.Start,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    } else {
+                        AppleMusicLyricLineText(
+                            text = line.text.trim().ifBlank { " " },
+                            active = isActive,
+                            progress = displayProgress,
+                            accent = accent
+                        )
+                    }
                     if (distance <= 1) {
                         line.translation?.takeIf { it.isNotBlank() }?.let { translation ->
                             Spacer(Modifier.height(if (isActive) 8.dp else 5.dp))
-                            if (isActive) {
+                            if (plain) {
+                                Text(
+                                    text = translation,
+                                    color = Color.White.copy(alpha = if (isActive) 0.62f else 0.34f),
+                                    style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 20.sp),
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = if (isActive) 3 else 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            } else if (isActive) {
                                 AppleMusicLyricLineText(
                                     text = translation,
                                     active = true,
-                                    progress = karaokeProgress,
+                                    progress = displayProgress,
                                     accent = accent,
                                     activeTextColor = Color.White.copy(alpha = 0.76f),
                                     unsungTextColor = Color.White.copy(alpha = 0.30f),
@@ -2479,11 +2734,24 @@ private fun GlassLyricsPanel(
                         }
                         line.romanization?.takeIf { it.isNotBlank() }?.let { romanization ->
                             Spacer(Modifier.height(if (isActive) 4.dp else 3.dp))
-                            if (isActive) {
+                            if (plain) {
+                                Text(
+                                    text = romanization,
+                                    color = Color.White.copy(alpha = if (isActive) 0.48f else 0.26f),
+                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                        fontSize = if (isActive) 14.sp else 12.sp,
+                                        lineHeight = if (isActive) 19.sp else 17.sp
+                                    ),
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = if (isActive) 2 else 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            } else if (isActive) {
                                 AppleMusicLyricLineText(
                                     text = romanization,
                                     active = true,
-                                    progress = karaokeProgress,
+                                    progress = displayProgress,
                                     accent = accent,
                                     activeTextColor = Color.White.copy(alpha = 0.58f),
                                     unsungTextColor = Color.White.copy(alpha = 0.22f),
@@ -2656,11 +2924,81 @@ private fun AppleMusicLyricLineText(
 }
 
 @Composable
+private fun PlainLyricLineText(
+    text: String,
+    active: Boolean,
+    textAlign: TextAlign,
+    modifier: Modifier = Modifier
+) {
+    Text(
+        text = text,
+        color = if (active) Color.White else Color.White.copy(alpha = 0.48f),
+        style = if (active) {
+            MaterialTheme.typography.headlineLarge.copy(fontSize = 32.sp, lineHeight = 37.sp)
+        } else {
+            MaterialTheme.typography.titleLarge.copy(fontSize = 22.sp, lineHeight = 28.sp)
+        },
+        fontWeight = if (active) FontWeight.Black else FontWeight.Bold,
+        textAlign = textAlign,
+        maxLines = if (active) 6 else 2,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier
+    )
+}
+
+@Composable
+private fun NoLyricsRefreshInline(
+    dark: Boolean,
+    onRefreshLyrics: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "暂无歌词",
+            color = if (dark) Color.White.copy(alpha = 0.62f) else Color(0xFF4B5563),
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Black,
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        TextButton(onClick = onRefreshLyrics) {
+            Text(
+                text = "刷新歌词",
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.Black
+            )
+        }
+    }
+}
+
+private fun List<LyricLine>.isNoLyricsPlaceholder(): Boolean {
+    if (isEmpty()) return true
+    return none { line ->
+        val text = line.text.trim()
+        text.isNotBlank() &&
+            text != "歌词加载中..." &&
+            text != "暂时没有歌词" &&
+            text != "暂无歌词"
+    }
+}
+
+private fun steppedLyricProgress(text: String, progress: Float): Float {
+    val charCount = text.trim().length.coerceAtLeast(1)
+    return (kotlin.math.ceil(progress.coerceIn(0f, 1f) * charCount) / charCount).coerceIn(0f, 1f)
+}
+
+@Composable
 private fun ParticleLyricsPanel(
     lyrics: List<LyricLine>,
     activeIndex: Int,
     isLoading: Boolean,
     playbackPositionMs: Long,
+    onRefreshLyrics: () -> Unit,
     accent: Color,
     modifier: Modifier = Modifier
 ) {
@@ -2697,6 +3035,7 @@ private fun ParticleLyricsPanel(
                 activeIndex = activeIndex,
                 isLoading = isLoading,
                 playbackPositionMs = playbackPositionMs,
+                onRefreshLyrics = onRefreshLyrics,
                 center = true,
                 dark = true,
                 activeTextStyle = MaterialTheme.typography.displaySmall,
@@ -2715,6 +3054,7 @@ private fun ImmersiveLyrics(
     activeIndex: Int,
     isLoading: Boolean,
     playbackPositionMs: Long,
+    onRefreshLyrics: () -> Unit,
     center: Boolean,
     dark: Boolean,
     activeTextStyle: androidx.compose.ui.text.TextStyle,
@@ -2726,6 +3066,7 @@ private fun ImmersiveLyrics(
     val activeTextColor = if (dark) Color.White else Color(0xFF111111)
     val inactiveTextColor = if (dark) Color.White.copy(alpha = 0.72f) else Color(0xFF111111).copy(alpha = 0.56f)
     val glowColor = if (dark) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primary.copy(alpha = 0.62f)
+    val noLyricsAvailable = !isLoading && lyrics.isNoLyricsPlaceholder()
     val lyricItems = remember(lyrics, isLoading) {
         if (isLoading) {
             listOf(LyricLine(0L, "歌词加载中..."))
@@ -2867,36 +3208,44 @@ private fun ImmersiveLyrics(
                     ),
                 horizontalAlignment = if (center) Alignment.CenterHorizontally else Alignment.Start
             ) {
-                AppleMusicLyricLineText(
-                    text = lineText,
-                    active = isActive,
-                    progress = activeProgress,
-                    accent = MaterialTheme.colorScheme.primary,
-                    activeTextColor = activeTextColor,
-                    inactiveTextColor = inactiveTextColor,
-                    unsungTextColor = activeTextColor.copy(alpha = if (dark) 0.38f else 0.30f),
-                    activeTextStyle = activeTextStyle,
-                    inactiveTextStyle = inactiveTextStyle,
-                    textAlign = if (center) TextAlign.Center else TextAlign.Start,
-                    activeMaxLines = when {
-                        isActive && shouldHoldFocusLonger -> 9
-                        isActive && shouldUseExpandedReading -> 8
-                        isActive -> 6
-                        else -> 2
-                    },
-                    inactiveMaxLines = if (shouldUseExpandedReading) 3 else 2,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(
-                            if (lineGlowAlpha > 0f) {
-                                glowColor.copy(alpha = lineGlowAlpha * if (dark) 0.72f else 0.38f)
-                            } else {
-                                Color.Transparent
-                            },
-                            RoundedCornerShape(28.dp)
-                        )
-                        .padding(horizontal = 10.dp, vertical = if (isActive) 10.dp else 6.dp)
-                )
+                if (noLyricsAvailable && index == 0) {
+                    NoLyricsRefreshInline(
+                        dark = dark,
+                        onRefreshLyrics = onRefreshLyrics,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                } else {
+                    AppleMusicLyricLineText(
+                        text = lineText,
+                        active = isActive,
+                        progress = activeProgress,
+                        accent = MaterialTheme.colorScheme.primary,
+                        activeTextColor = activeTextColor,
+                        inactiveTextColor = inactiveTextColor,
+                        unsungTextColor = activeTextColor.copy(alpha = if (dark) 0.38f else 0.30f),
+                        activeTextStyle = activeTextStyle,
+                        inactiveTextStyle = inactiveTextStyle,
+                        textAlign = if (center) TextAlign.Center else TextAlign.Start,
+                        activeMaxLines = when {
+                            isActive && shouldHoldFocusLonger -> 9
+                            isActive && shouldUseExpandedReading -> 8
+                            isActive -> 6
+                            else -> 2
+                        },
+                        inactiveMaxLines = if (shouldUseExpandedReading) 3 else 2,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                if (lineGlowAlpha > 0f) {
+                                    glowColor.copy(alpha = lineGlowAlpha * if (dark) 0.72f else 0.38f)
+                                } else {
+                                    Color.Transparent
+                                },
+                                RoundedCornerShape(28.dp)
+                            )
+                            .padding(horizontal = 10.dp, vertical = if (isActive) 10.dp else 6.dp)
+                    )
+                }
             }
         }
         item(key = "lyrics-bottom-spacer") {

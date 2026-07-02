@@ -46,6 +46,7 @@ import coil.compose.AsyncImage
 import com.silisten.app.SiListenUiState
 import com.silisten.app.SiListenViewModel
 import com.silisten.app.data.model.MusicPlaylist
+import com.silisten.app.data.model.PlaylistKind
 import com.silisten.app.data.model.Song
 
 @Composable
@@ -155,7 +156,7 @@ internal fun AddToPlaylistSheet(
                 EmptyStateCard(
                     title = if (query.isBlank()) "还没有可加入的歌单" else "没有找到歌单",
                     subtitle = if (query.isBlank()) {
-                        "登录后同步网易云歌单，或先在网易云音乐里创建一个歌单。"
+                        "可以先在本地歌单库创建歌单，或登录后同步网易云自建歌单。"
                     } else {
                         "换个关键词试试。"
                     },
@@ -203,7 +204,13 @@ internal fun AddToPlaylistSheet(
                             )
                             Spacer(Modifier.height(3.dp))
                             Text(
-                                text = playlist.subtitle.ifBlank { "网易云歌单" },
+                                text = playlist.subtitle.ifBlank {
+                                    if (playlist.kind == PlaylistKind.LocalPlaylist) {
+                                        "本地歌单 · ${playlist.songs.size} 首"
+                                    } else {
+                                        "网易云歌单"
+                                    }
+                                },
                                 color = mutedText,
                                 style = MaterialTheme.typography.bodySmall,
                                 maxLines = 1,

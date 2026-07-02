@@ -6,6 +6,7 @@ import com.silisten.app.data.model.MusicPlaylist
 import com.silisten.app.data.model.MusicSourceInfo
 import com.silisten.app.data.model.PlaylistComment
 import com.silisten.app.data.model.PlaylistCommentBundle
+import com.silisten.app.data.model.PlaylistCommentReply
 import com.silisten.app.data.model.PlaylistCommentSort
 import com.silisten.app.data.model.SourcePlatformIds
 import com.silisten.app.data.model.Song
@@ -78,9 +79,11 @@ class LxPlatformMusicSource(
     override suspend fun commentsForSong(
         song: Song,
         sort: PlaylistCommentSort,
-        limit: Int
+        limit: Int,
+        offset: Int
     ): PlaylistCommentBundle =
         withContext(Dispatchers.IO) {
+            if (offset > 0) return@withContext PlaylistCommentBundle(emptyList(), 0)
             runCatching {
                 when (platform.id) {
                     SourcePlatformIds.KUWO -> kuwoComments(song, sort, limit)
@@ -260,7 +263,13 @@ class LxPlatformMusicSource(
                 content = item.optString("msg").clean("这条评论暂时没有内容"),
                 timeLabel = item.optLong("time", 0L).secondsToCommentTime(),
                 likedCount = item.optInt("like_num", 0),
-                replyCount = item.optJSONArray("child_comments")?.length() ?: 0
+                replyCount = item.optJSONArray("child_comments")?.length() ?: 0,
+                replies = item.optJSONArray("child_comments").toLxCommentReplies(
+                    authorKeys = listOf("u_name", "nickname", "name"),
+                    contentKeys = listOf("msg", "content"),
+                    timeKeys = listOf("time"),
+                    likeKeys = listOf("like_num")
+                )
             )
         }
         val total = if (sort == PlaylistCommentSort.Hot) {
@@ -336,7 +345,13 @@ class LxPlatformMusicSource(
                 content = content,
                 timeLabel = item.optString("time").toQqCommentTime(),
                 likedCount = item.optInt("praisenum", 0),
-                replyCount = item.optJSONArray("middlecommentcontent")?.length() ?: 0
+                replyCount = item.optJSONArray("middlecommentcontent")?.length() ?: 0,
+                replies = item.optJSONArray("middlecommentcontent").toLxCommentReplies(
+                    authorKeys = listOf("subcommentnick", "nick", "name"),
+                    contentKeys = listOf("subcommentcontent", "content"),
+                    timeKeys = listOf("time"),
+                    likeKeys = listOf("praisenum")
+                )
             )
         }
         return PlaylistCommentBundle(comments, comment.optInt("commenttotal", comments.size))
@@ -394,7 +409,13 @@ class LxPlatformMusicSource(
                 content = item.optString("Content").replace("\\n", "\n").clean("这条评论暂时没有内容"),
                 timeLabel = item.optString("PubTime").toQqCommentTime(),
                 likedCount = item.optInt("PraiseNum", 0),
-                replyCount = item.optJSONArray("SubComments")?.length() ?: 0
+                replyCount = item.optJSONArray("SubComments")?.length() ?: 0,
+                replies = item.optJSONArray("SubComments").toLxCommentReplies(
+                    authorKeys = listOf("Nick", "nick", "name"),
+                    contentKeys = listOf("Content", "content"),
+                    timeKeys = listOf("PubTime", "time"),
+                    likeKeys = listOf("PraiseNum", "praisenum")
+                )
             )
         }
         return PlaylistCommentBundle(comments, data.optInt("Total", comments.size))
@@ -830,6 +851,35 @@ private fun Long.secondsToCommentTime(): String =
 
 private fun Long.toCommentTime(): String =
     SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(this))
+
+private fun JSONArray?.toLxCommentReplies(
+    authorKeys: List<String>,
+    contentKeys: List<String>,
+    timeKeys: List<String>,
+    likeKeys: List<String>
+): List<PlaylistCommentReply> {
+    if (this == null) return emptyList()
+    return mapObjects { item ->
+        val author = item.firstClean(authorKeys, "用户")
+        val content = item.firstClean(contentKeys, "")
+        if (content.isBlank()) {
+            null
+        } else {
+            PlaylistCommentReply(
+                authorName = author,
+                content = content,
+                timeLabel = item.firstClean(timeKeys, ""),
+                likedCount = item.firstInt(likeKeys)
+            )
+        }
+    }
+}
+
+private fun JSONObject.firstClean(keys: List<String>, fallback: String): String =
+    keys.firstNotNullOfOrNull { key -> optString(key).clean().takeIf { it.isNotBlank() } } ?: fallback
+
+private fun JSONObject.firstInt(keys: List<String>): Int =
+    keys.firstNotNullOfOrNull { key -> optInt(key, 0).takeIf { it > 0 } } ?: 0
 
 private fun String.toQqCommentTime(): String {
     val raw = trim()

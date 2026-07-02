@@ -1,5 +1,6 @@
 ﻿package com.silisten.app
 
+import android.graphics.Color
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.Manifest
@@ -9,10 +10,14 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.platform.ComposeView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.silisten.app.ui.SiListenApp
 import com.silisten.app.ui.theme.SiListenTheme
+import com.silisten.app.ui.theme.resolveDarkTheme
 
 class MainActivity : ComponentActivity() {
     private val notificationPermissionLauncher = registerForActivityResult(
@@ -21,6 +26,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         requestNotificationPermissionIfNeeded()
         val root = FrameLayout(this).apply {
             layoutParams = ViewGroup.LayoutParams(
@@ -39,10 +45,20 @@ class MainActivity : ComponentActivity() {
 
         contentView.setContent {
             val viewModel: SiListenViewModel = viewModel()
+            val themeSettings = viewModel.uiState.themeSettings
+            val darkTheme = themeSettings.resolveDarkTheme()
             LaunchedEffect(viewModel) {
                 handlePlaybackIntent(viewModel)
             }
-            SiListenTheme(viewModel.uiState.themeSettings) {
+            SideEffect {
+                window.statusBarColor = Color.TRANSPARENT
+                window.navigationBarColor = Color.TRANSPARENT
+                WindowInsetsControllerCompat(window, window.decorView).apply {
+                    isAppearanceLightStatusBars = !darkTheme
+                    isAppearanceLightNavigationBars = !darkTheme
+                }
+            }
+            SiListenTheme(themeSettings) {
                 SiListenApp(viewModel)
             }
         }

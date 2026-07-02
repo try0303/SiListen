@@ -1227,15 +1227,30 @@ fun SourcesScreen(
                                         title = "本地音乐",
                                         subtitle = uiState.localMusicMessage,
                                         coverUrl = "",
-                                        songs = uiState.localSongs
+                                        songs = uiState.localSongs,
+                                        kind = PlaylistKind.LocalMusic
                                     )
                                 )
                             }
                         )
-                        uiState.localSongs.take(5).forEach { song ->
-                            SongRow(song = song, liked = false, likeLoading = false, onClick = { viewModel.playSong(song) })
-                        }
                     }
+                }
+            }
+        }
+        item {
+            Surface(
+                color = cardColor,
+                border = if (dark) BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)) else BorderStroke(1.dp, Color(0xFFE7E7EA)),
+                shape = RoundedCornerShape(24.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    LocalPlaylistLibrarySection(
+                        playlists = uiState.localPlaylists,
+                        dark = dark,
+                        onCreate = viewModel::createLocalPlaylist,
+                        onOpenPlaylist = viewModel::openPlaylist
+                    )
                 }
             }
         }
@@ -1302,11 +1317,13 @@ fun AccountScreen(
                             title = "本地音乐",
                             subtitle = uiState.localMusicMessage,
                             coverUrl = "",
-                            songs = uiState.localSongs
+                            songs = uiState.localSongs,
+                            kind = PlaylistKind.LocalMusic
                         )
                     )
                 },
-                onPlaySong = viewModel::playSong
+                onCreateLocalPlaylist = viewModel::createLocalPlaylist,
+                onOpenPlaylist = viewModel::openPlaylist
             )
         }
         item {
@@ -1462,7 +1479,8 @@ private fun AccountLocalMusicCard(
     dark: Boolean,
     onScan: () -> Unit,
     onOpenAll: () -> Unit,
-    onPlaySong: (Song) -> Unit
+    onCreateLocalPlaylist: (String) -> Unit,
+    onOpenPlaylist: (MusicPlaylist) -> Unit
 ) {
     val titleColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
     val mutedText = if (dark) Color(0xFFB8C1B9) else Color(0xFF5F6368)
@@ -1516,14 +1534,65 @@ private fun AccountLocalMusicCard(
                     onClick = onOpenAll,
                     modifier = Modifier.fillMaxWidth()
                 )
-                uiState.localSongs.take(3).forEach { song ->
-                    SongRow(
-                        song = song,
-                        liked = false,
-                        likeLoading = false,
-                        onClick = { onPlaySong(song) }
-                    )
-                }
+            }
+            LocalPlaylistLibrarySection(
+                playlists = uiState.localPlaylists,
+                dark = dark,
+                onCreate = onCreateLocalPlaylist,
+                onOpenPlaylist = onOpenPlaylist
+            )
+        }
+    }
+}
+
+@Composable
+private fun LocalPlaylistLibrarySection(
+    playlists: List<MusicPlaylist>,
+    dark: Boolean,
+    onCreate: (String) -> Unit,
+    onOpenPlaylist: (MusicPlaylist) -> Unit
+) {
+    var title by remember { mutableStateOf("") }
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        SectionBulletTitle("本地歌单库", dark = dark)
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            OutlinedTextField(
+                value = title,
+                onValueChange = { title = it },
+                singleLine = true,
+                placeholder = { Text("新建本地歌单") },
+                shape = RoundedCornerShape(999.dp),
+                modifier = Modifier.weight(1f)
+            )
+            PrimaryActionButton(
+                text = "创建",
+                enabled = title.isNotBlank(),
+                onClick = {
+                    onCreate(title)
+                    title = ""
+                },
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary
+            )
+        }
+        if (playlists.isEmpty()) {
+            EmptyStateCard(
+                title = "还没有本地歌单",
+                subtitle = "创建后可以从歌曲菜单里加入本地歌单，不需要登录网易云。",
+                dark = dark
+            )
+        } else {
+            playlists.forEach { playlist ->
+                AccountLibraryRow(
+                    playlist = playlist,
+                    subtitle = playlist.subtitle.ifBlank { "本地歌单 · ${playlist.songs.size} 首" },
+                    dark = dark,
+                    onClick = { onOpenPlaylist(playlist) }
+                )
             }
         }
     }

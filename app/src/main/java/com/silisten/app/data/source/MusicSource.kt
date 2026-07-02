@@ -27,6 +27,7 @@ interface SongCommentSource {
     suspend fun commentsForSong(
         song: Song,
         sort: PlaylistCommentSort,
-        limit: Int = 30
+        limit: Int = 30,
+        offset: Int = 0
     ): PlaylistCommentBundle
 }

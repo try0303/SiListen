@@ -4,6 +4,7 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
@@ -39,6 +40,10 @@
             android:name=".playback.PlaybackService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback"
+            android:stopWithTask="false" />
+        <service
+            android:name=".playback.LyricOverlayService"
+            android:exported="false"
             android:stopWithTask="false" />
     </application>
 </manifest>

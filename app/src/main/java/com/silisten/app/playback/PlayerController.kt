@@ -134,8 +134,9 @@ class PlayerController(context: Context) {
                 }
 
                 override fun onCustomAction(action: String, extras: Bundle?) {
-                    if (action == PlaybackNotificationController.ACTION_LIKE) {
-                        PlaybackNotificationBridge.like()
+                    when (action) {
+                        PlaybackNotificationController.ACTION_LIKE -> PlaybackNotificationBridge.like()
+                        PlaybackNotificationController.ACTION_DESKTOP_LYRIC -> PlaybackNotificationBridge.toggleDesktopLyric(appContext)
                     }
                 }
             },
@@ -404,6 +405,10 @@ class PlayerController(context: Context) {
         syncNotification()
     }
 
+    fun refreshNotification() {
+        syncNotification()
+    }
+
     fun release() {
         PlaybackNotificationBridge.detach(this)
         notificationArtworkJob?.cancel()
@@ -440,6 +445,7 @@ class PlayerController(context: Context) {
                 playbackState = state,
                 mediaSessionToken = systemMediaSession.sessionToken,
                 isCurrentSongLiked = isLiked,
+                desktopLyricEnabled = isDesktopLyricEnabled(),
                 artwork = artwork,
                 contentTextOverride = if (notificationLyricEnabled) notificationLyricText else null
             )
@@ -578,9 +584,20 @@ class PlayerController(context: Context) {
                         if (isLiked) R.drawable.ic_favorite_24 else R.drawable.ic_favorite_border_24
                     ).build()
                 )
+                .addCustomAction(
+                    PlatformPlaybackState.CustomAction.Builder(
+                        PlaybackNotificationController.ACTION_DESKTOP_LYRIC,
+                        if (isDesktopLyricEnabled()) "关闭桌面歌词" else "桌面歌词",
+                        if (isDesktopLyricEnabled()) R.drawable.ic_desktop_lyric_checked_24 else R.drawable.ic_desktop_lyric_24
+                    ).build()
+                )
                 .build()
         )
     }
+
+    private fun isDesktopLyricEnabled(): Boolean =
+        appContext.getSharedPreferences("playback_settings", Context.MODE_PRIVATE)
+            .getBoolean("desktop_lyric", false)
 
     private fun playerContentIntent(): PendingIntent {
         val intent = Intent(appContext, com.silisten.app.MainActivity::class.java).apply {

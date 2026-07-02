@@ -17,6 +17,11 @@ class PlaybackNotificationReceiver : BroadcastReceiver() {
             PlaybackNotificationController.ACTION_TOGGLE -> controller.toggle()
             PlaybackNotificationController.ACTION_PREVIOUS -> controller.previous()
             PlaybackNotificationController.ACTION_NEXT -> controller.next()
+            PlaybackNotificationController.ACTION_DESKTOP_LYRIC -> {
+                if (!PlaybackNotificationBridge.toggleDesktopLyric(context)) {
+                    LyricOverlayService.openOverlayPermissionSettings(context)
+                }
+            }
             PlaybackNotificationController.ACTION_DISMISS -> controller.dismissNotification()
         }
     }
@@ -34,6 +39,7 @@ internal object PlaybackNotificationBridge {
     private var controller: PlayerController? = null
     private var likeHandler: (() -> Unit)? = null
     private var likeStateProvider: ((com.silisten.app.data.model.Song) -> Boolean)? = null
+    private var desktopLyricHandler: ((Boolean?) -> Boolean)? = null
 
     fun attach(controller: PlayerController) {
         this.controller = controller
@@ -47,6 +53,10 @@ internal object PlaybackNotificationBridge {
         likeStateProvider = provider
     }
 
+    fun attachDesktopLyricHandler(handler: (Boolean?) -> Boolean) {
+        desktopLyricHandler = handler
+    }
+
     fun detachLikeHandler(handler: () -> Unit) {
         if (likeHandler === handler) {
             likeHandler = null
@@ -56,6 +66,12 @@ internal object PlaybackNotificationBridge {
     fun detachLikeStateProvider(provider: (com.silisten.app.data.model.Song) -> Boolean) {
         if (likeStateProvider === provider) {
             likeStateProvider = null
+        }
+    }
+
+    fun detachDesktopLyricHandler(handler: (Boolean?) -> Boolean) {
+        if (desktopLyricHandler === handler) {
+            desktopLyricHandler = null
         }
     }
 
@@ -84,6 +100,27 @@ internal object PlaybackNotificationBridge {
 
     fun next() {
         controller?.next()
+    }
+
+    fun toggleDesktopLyric(context: Context): Boolean {
+        return setDesktopLyric(context, enabled = null)
+    }
+
+    fun setDesktopLyric(context: Context, enabled: Boolean?): Boolean {
+        desktopLyricHandler?.let { handler ->
+            val handled = handler.invoke(enabled)
+            controller?.refreshNotification()
+            return handled
+        }
+        if (!LyricOverlayService.canDrawOverlays(context)) return false
+        val preferences = context.applicationContext.getSharedPreferences("playback_settings", Context.MODE_PRIVATE)
+        val target = enabled ?: !preferences.getBoolean("desktop_lyric", false)
+        preferences.edit().putBoolean("desktop_lyric", target).apply()
+        if (!target) {
+            LyricOverlayService.hide(context)
+        }
+        controller?.refreshNotification()
+        return true
     }
 
     fun dismissNotification() {

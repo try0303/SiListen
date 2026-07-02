@@ -247,22 +247,26 @@ class MusicRepository(
 
     suspend fun neteaseSongComments(
         song: Song,
-        sort: PlaylistCommentSort
+        sort: PlaylistCommentSort,
+        limit: Int = 30,
+        offset: Int = 0
     ): PlaylistCommentBundle = when (sort) {
-        PlaylistCommentSort.Hot -> netease().hotSongComments(song)
-        PlaylistCommentSort.Latest -> netease().songComments(song)
+        PlaylistCommentSort.Hot -> netease().hotSongComments(song, limit, offset)
+        PlaylistCommentSort.Latest -> netease().songComments(song, limit, offset)
     }
 
     suspend fun songComments(
         song: Song,
         sort: PlaylistCommentSort,
-        sourceSettings: SourceSettingsState
+        sourceSettings: SourceSettingsState,
+        limit: Int = 30,
+        offset: Int = 0
     ): PlaylistCommentBundle? {
         val commentSourceId = song.commentSourceId(sourceSettings.enabledCommentPlatformIds)
             ?: return null
         val commentSong = song.withCommentSourceIdentity(commentSourceId) ?: return null
         val source = registry.findById(commentSourceId) as? SongCommentSource ?: return null
-        return source.commentsForSong(commentSong, sort)
+        return source.commentsForSong(commentSong, sort, limit, offset)
     }
 
     suspend fun neteaseTogglePlaylistSubscription(

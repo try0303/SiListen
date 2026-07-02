@@ -7,6 +7,8 @@ import com.silisten.app.data.model.MusicSourceInfo
 import com.silisten.app.data.model.PlaybackQuality
 import com.silisten.app.data.model.PlaylistComment
 import com.silisten.app.data.model.PlaylistCommentBundle
+import com.silisten.app.data.model.PlaylistCommentImage
+import com.silisten.app.data.model.PlaylistCommentReply
 import com.silisten.app.data.model.PlaylistCommentSort
 import com.silisten.app.data.model.PlaylistKind
 import com.silisten.app.data.model.Song
@@ -291,10 +293,11 @@ class NeteaseMusicSource(
             )
         }
 
-    suspend fun songComments(song: Song, limit: Int = 30): PlaylistCommentBundle =
+    suspend fun songComments(song: Song, limit: Int = 30, offset: Int = 0): PlaylistCommentBundle =
         withContext(Dispatchers.IO) {
+            val pageNo = (offset / limit.coerceAtLeast(1)) + 1
             val json = apiClient.getJson(
-                "/comment/music?id=${song.id.encode()}&limit=$limit&sortType=2&timestamp=${System.currentTimeMillis()}"
+                "/comment/music?id=${song.id.encode()}&limit=$limit&offset=$offset&pageNo=$pageNo&sortType=2&timestamp=${System.currentTimeMillis()}"
             )
             val comments = json.optJSONArray("comments").orEmpty().toPlaylistComments()
             PlaylistCommentBundle(
@@ -303,15 +306,15 @@ class NeteaseMusicSource(
             )
         }
 
-    suspend fun hotSongComments(song: Song, limit: Int = 30): PlaylistCommentBundle =
+    suspend fun hotSongComments(song: Song, limit: Int = 30, offset: Int = 0): PlaylistCommentBundle =
         withContext(Dispatchers.IO) {
             val json = apiClient.getJson(
-                "/comment/hot?id=${song.id.encode()}&type=0&limit=$limit&timestamp=${System.currentTimeMillis()}"
+                "/comment/hot?id=${song.id.encode()}&type=0&limit=$limit&offset=$offset&timestamp=${System.currentTimeMillis()}"
             )
             val comments = json.optJSONArray("hotComments").orEmpty().toPlaylistComments()
             PlaylistCommentBundle(
                 comments = comments,
-                totalCount = comments.size
+                totalCount = json.optInt("total", comments.size)
             )
         }
 
@@ -598,11 +601,12 @@ class NeteaseMusicSource(
     override suspend fun commentsForSong(
         song: Song,
         sort: PlaylistCommentSort,
-        limit: Int
+        limit: Int,
+        offset: Int
     ): PlaylistCommentBundle =
         when (sort) {
-            PlaylistCommentSort.Hot -> hotSongComments(song, limit)
-            PlaylistCommentSort.Latest -> songComments(song, limit)
+            PlaylistCommentSort.Hot -> hotSongComments(song, limit, offset)
+            PlaylistCommentSort.Latest -> songComments(song, limit, offset)
         }
 
     private suspend fun officialStreamUrl(song: Song, quality: PlaybackQuality): String {
@@ -780,6 +784,7 @@ class NeteaseMusicSource(
             for (index in 0 until length()) {
                 val item = optJSONObject(index) ?: continue
                 val user = item.optJSONObject("user")
+                val replies = item.commentReplies()
                 add(
                     PlaylistComment(
                         id = item.optString("commentId").ifBlank { "comment-$index" },
@@ -790,7 +795,103 @@ class NeteaseMusicSource(
                             item.optLong("time", 0L).takeIf { value -> value > 0L }?.toCommentTimeLabel().orEmpty()
                         }.ifBlank { "刚刚" },
                         likedCount = item.optInt("likedCount", 0),
-                        replyCount = item.optInt("replyCount", 0)
+                        replyCount = maxOf(item.optInt("replyCount", 0), item.floorReplyCount(), replies.size),
+                        images = item.commentImages(),
+                        replies = replies
+                    )
+                )
+            }
+        }
+    }
+
+    private fun JSONObject.commentImages(): List<PlaylistCommentImage> {
+        val arrays = listOf("picList", "pics", "images", "imageList")
+            .mapNotNull { key -> optJSONArray(key) }
+        val directObjects = listOf("picture", "image", "pic")
+            .mapNotNull { key -> optJSONObject(key) }
+        return buildList {
+            arrays.forEach { array ->
+                for (index in 0 until array.length()) {
+                    val item = array.optJSONObject(index)
+                    val url = item?.commentImageUrl().orEmpty()
+                        .ifBlank { array.optString(index).cleanText() }
+                    if (url.isNotBlank()) {
+                        add(
+                            PlaylistCommentImage(
+                                url = url,
+                                width = item?.optInt("width", 0) ?: 0,
+                                height = item?.optInt("height", 0) ?: 0
+                            )
+                        )
+                    }
+                }
+            }
+            directObjects.forEach { item ->
+                val url = item.commentImageUrl()
+                if (url.isNotBlank()) {
+                    add(
+                        PlaylistCommentImage(
+                            url = url,
+                            width = item.optInt("width", 0),
+                            height = item.optInt("height", 0)
+                        )
+                    )
+                }
+            }
+            listOf("imageUrl", "picUrl", "resourceUrl").forEach { key ->
+                val url = optString(key).cleanText()
+                if (url.isNotBlank()) add(PlaylistCommentImage(url))
+            }
+        }.distinctBy { it.url }
+    }
+
+    private fun JSONObject.commentImageUrl(): String =
+        listOf("originUrl", "rectangleUrl", "squareUrl", "url", "picUrl", "imageUrl", "resourceUrl")
+            .firstNotNullOfOrNull { key -> optString(key).cleanText().takeIf { it.isNotBlank() } }
+            .orEmpty()
+
+    private fun JSONObject.commentReplies(): List<PlaylistCommentReply> =
+        buildList {
+            addAll(optJSONArray("beReplied").toCommentReplies())
+            addAll(optJSONArray("replies").toCommentReplies())
+            addAll(optJSONObject("showFloorComment")?.optJSONArray("comments").toCommentReplies())
+            addAll(optJSONObject("showFloorComment")?.optJSONArray("replies").toCommentReplies())
+            addAll(optJSONObject("floorComment")?.optJSONArray("comments").toCommentReplies())
+        }.distinctBy { "${it.authorName}:${it.content}" }
+
+    private fun JSONObject.floorReplyCount(): Int =
+        listOfNotNull(optJSONObject("showFloorComment"), optJSONObject("floorComment"))
+            .maxOfOrNull { floor ->
+                maxOf(
+                    floor.optInt("replyCount", 0),
+                    floor.optInt("totalCount", 0),
+                    floor.optInt("count", 0),
+                    floor.optJSONArray("comments")?.length() ?: 0,
+                    floor.optJSONArray("replies")?.length() ?: 0
+                )
+            }
+            ?: 0
+
+    private fun JSONArray?.toCommentReplies(): List<PlaylistCommentReply> {
+        if (this == null) return emptyList()
+        return buildList {
+            for (index in 0 until length()) {
+                val item = optJSONObject(index) ?: continue
+                val user = item.optJSONObject("user")
+                    ?: item.optJSONObject("beRepliedUser")
+                    ?: item.optJSONObject("replyUser")
+                val content = item.optString("content").cleanText()
+                    .ifBlank { item.optJSONObject("beRepliedComment")?.optString("content").cleanText() }
+                    .ifBlank { item.optString("replyContent").cleanText() }
+                if (content.isBlank()) continue
+                add(
+                    PlaylistCommentReply(
+                        authorName = user?.optString("nickname").cleanText("用户"),
+                        content = content,
+                        timeLabel = item.optString("timeStr").cleanText().ifBlank {
+                            item.optLong("time", 0L).takeIf { value -> value > 0L }?.toCommentTimeLabel().orEmpty()
+                        },
+                        likedCount = item.optInt("likedCount", 0)
                     )
                 )
             }

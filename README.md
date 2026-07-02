@@ -1,53 +1,84 @@
 # SiListen
 
-SiListen 是一个使用 Kotlin 原生 Android 技术栈实现的音乐播放器原型，界面使用 Jetpack Compose，播放内核使用 Media3/ExoPlayer。
+SiListen 是一个使用 Kotlin + Jetpack Compose 开发的 Android 音乐播放器。项目目标是做一个简洁、沉浸、接近 Apple Music 观感的移动端音乐应用，同时保留本地音乐、自定义播放音源、歌词、桌面歌词、通知栏媒体控制等 Android 平台能力。
 
-界面方向参考了 iOS 的全屏播放器质感和 Spotify 的深色音乐氛围：包含首页推荐、搜索、音源切换、底部迷你播放器、全屏播放页、队列控制、上一首/下一首和进度拖动。
+当前仓库只应该包含 SiListen 应用本身需要的源码、资源、文档和构建配置。用于学习参考的第三方开源项目、临时下载目录、构建产物和 APK 不应提交到仓库。
 
-## 当前内容
+## 主要功能
 
-- `MusicSource`：统一音源协议，负责推荐、搜索和播放地址解析。
-- `NeteaseApiClient`：网易云接口客户端，负责短信验证码、手机号登录、Cookie 保存、登录状态刷新和退出登录。
-- `NeteaseMusicSource`：默认网易云音乐音源，复用登录态 Cookie 进行搜索和播放地址解析。
-- `DemoMusicSource`：公开示例音频音源，用于验证播放队列，也可作为接入其他 API 的模板。
-- `PlayerController`：基于 Media3/ExoPlayer 的播放队列、播放暂停、上一首、下一首、拖动进度和状态同步；播放前会过滤无法解析播放地址的歌曲。
-- `MainActivity`：首页、搜索、音源页、账号登录页、迷你播放器和全屏播放器的 Compose 界面。
+- 首页推荐、搜索、歌单、专辑、歌手、本地音乐等基础音乐浏览能力。
+- 网易云账号登录、歌单同步、红心收藏、评论展示与加载更多。
+- 自定义 LX 风格播放音源脚本，用于在歌曲无法直接播放时解析可播放地址。
+- 支持本地音乐扫描，并通过“全部本地歌曲”进入完整列表。
+- 支持本地歌单库：用户可以创建本地歌单，并把本地或在线歌曲加入本地歌单。
+- 播放页包含封面、歌词预览、播放模式、定时停止、队列、歌词、评论等入口。
+- 支持 Apple Music 风格歌词页、逐字高亮歌词、翻译/罗马音展示。
+- 支持通知栏媒体控制、桌面歌词、状态栏歌词、迷你播放器和底部浮动导航。
 
-## 网易云登录
+## 本地音乐与本地歌单
 
-账号页提供手机号验证码登录：
+本地音乐扫描依赖系统音频读取权限：
 
-1. 输入手机号。
-2. 点击“获取验证码”。
-3. 输入短信验证码。
-4. 点击“登录”。
+- Android 13 及以上：`READ_MEDIA_AUDIO`
+- Android 12 及以下：`READ_EXTERNAL_STORAGE`
 
-登录成功后会保存网易云 Cookie，后续默认网易云音源会带登录态请求 `/song/url/v1` 解析播放地址。
+扫描完成后，音乐库不会直接铺开全部本地歌曲，而是显示“查看全部本地歌曲”入口。用户可以在“本地歌单库”中新建歌单，并通过歌曲右侧菜单的“加入歌单”把歌曲加入本地歌单。
 
-## 接入其他音源
+本地歌单保存在应用私有的 SharedPreferences 中，保存的是歌曲快照，因此可以混合保存本地歌曲和在线歌曲。
 
-新增一个类实现 `MusicSource`，再注册到 `MusicSourceRegistry.create()` 即可。
+## 音源策略
 
-```kotlin
-class MyMusicSource : MusicSource {
-    override val info = MusicSourceInfo(...)
-    override suspend fun featured(): List<MusicPlaylist> = ...
-    override suspend fun search(keyword: String): List<Song> = ...
-    override suspend fun streamUrl(song: Song): String = ...
-}
+SiListen 默认以网易云身份作为账号、歌单、收藏和评论能力的主线。播放地址可以通过自定义音源脚本解析，用于解决部分歌曲无版权、VIP 或接口不可播放的问题。
+
+推荐使用方式：
+
+- 账号、歌单、评论、收藏：优先使用网易云身份。
+- 实际播放地址：可使用自定义音源脚本兜底解析。
+- 搜索、歌词、封面：按应用内音源策略匹配，必要时会尝试多平台兜底。
+
+请注意，自定义音源脚本由用户自行添加和维护，脚本可用性取决于脚本作者、目标平台接口状态和网络环境。
+
+## 构建方式
+
+推荐使用 Android Studio 打开项目根目录：
+
+```text
+D:\SiListen
 ```
 
-## 构建
-
-在 Android Studio 打开 `D:\SiListen`，或在命令行运行：
+也可以在命令行构建调试包：
 
 ```powershell
 $env:JAVA_HOME='E:\Program Files\Android\Android Studio\jbr'
-.\gradlew.bat :app:assembleDebug
+.\gradlew.bat :app:assembleDebug --console=plain
 ```
 
-已验证的调试包位置：
+构建成功后，调试 APK 通常位于：
 
 ```text
-D:\SiListen\app\build\outputs\apk\debug\app-debug.apk
+app\build\outputs\apk\debug\app-debug.apk
 ```
+
+## 权限说明
+
+- 网络权限：用于访问音乐接口、评论、歌词、封面和自定义音源脚本。
+- 通知权限：用于显示媒体播放通知和通知栏控制器。
+- 音频读取权限：用于扫描本地音乐。
+- 悬浮窗权限：用于桌面歌词。
+- 前台服务权限：用于稳定播放和歌词悬浮窗服务。
+
+## 仓库提交范围
+
+提交到 Gitee 时，请只包含 SiListen 项目相关内容。以下内容已通过 `.gitignore` 排除，不应提交：
+
+- `.reference/`
+- `.services/`
+- `.tmp*/`
+- `app/build/`
+- APK、AAB、ZIP、日志、IDE 缓存和其他构建产物
+
+如果需要研究第三方开源项目，请放在被忽略的临时目录中，不要直接纳入仓库历史。
+
+## 免责声明
+
+本项目仅用于学习、研究和个人使用。音乐版权、账号数据、第三方接口和自定义音源脚本均应遵守对应平台的服务条款与当地法律法规。请勿将本项目用于任何侵犯版权或违反平台规则的用途。

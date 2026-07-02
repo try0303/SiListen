@@ -736,7 +736,9 @@ fun SiListenApp(viewModel: SiListenViewModel) {
                         playerComments = uiState.playerComments,
                         playerCommentSort = uiState.playerCommentSort,
                         playerCommentCount = uiState.playerCommentCount,
+                        playerCommentsHasMore = uiState.playerCommentsHasMore,
                         isPlayerCommentsLoading = uiState.isPlayerCommentsLoading,
+                        isLoadingMorePlayerComments = uiState.isLoadingMorePlayerComments,
                         playerCommentsMessage = uiState.playerCommentsMessage,
                         themeSettings = uiState.themeSettings,
                         lyricDisplayMode = uiState.playbackSettings.lyricDisplayMode,
@@ -750,6 +752,7 @@ fun SiListenApp(viewModel: SiListenViewModel) {
                         onPrevious = viewModel::previous,
                         onPlayQueueIndex = viewModel::playQueueIndex,
                         onSeek = viewModel::seekTo,
+                        onRefreshLyrics = viewModel::refreshCurrentLyrics,
                         onToggleLike = viewModel::toggleSongLike,
                         onPlaybackModeChange = viewModel::selectPlaybackMode,
                         onStartSleepTimer = viewModel::startSleepTimer,
@@ -757,7 +760,8 @@ fun SiListenApp(viewModel: SiListenViewModel) {
                         onLikePromptAddToPlaylist = viewModel::openAddToPlaylistChooser,
                         onDismissLikePrompt = viewModel::dismissLikePrompt,
                         onPlayerCommentSortChange = viewModel::selectPlayerCommentSort,
-                        onRefreshPlayerComments = viewModel::refreshPlayerComments
+                        onRefreshPlayerComments = viewModel::refreshPlayerComments,
+                        onLoadMorePlayerComments = viewModel::loadMorePlayerComments
                     )
                 }
             }
@@ -772,7 +776,7 @@ fun SiListenApp(viewModel: SiListenViewModel) {
                 ) {
                     AddToPlaylistSheet(
                         song = song,
-                        playlists = uiState.userPlaylists.filter { playlist ->
+                        playlists = uiState.localPlaylists + uiState.userPlaylists.filter { playlist ->
                             playlist.kind == PlaylistKind.UserPlaylist &&
                                 playlist.title != "我喜欢的音乐"
                         },

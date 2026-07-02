@@ -29,6 +29,7 @@ internal class PlaybackNotificationController(
         playbackState: PlaybackState,
         mediaSessionToken: MediaSessionToken,
         isCurrentSongLiked: Boolean,
+        desktopLyricEnabled: Boolean,
         artwork: Bitmap? = null,
         contentTextOverride: String? = null
     ): Notification? {
@@ -67,7 +68,11 @@ internal class PlaybackNotificationController(
                 action = ACTION_TOGGLE
             ))
             .addAction(systemAction(android.R.drawable.ic_media_next, "下一首", ACTION_NEXT))
-            .addAction(systemAction(android.R.drawable.ic_menu_close_clear_cancel, "关闭", ACTION_DISMISS))
+            .addAction(appAction(
+                iconRes = if (desktopLyricEnabled) R.drawable.ic_desktop_lyric_checked_24 else R.drawable.ic_desktop_lyric_24,
+                title = if (desktopLyricEnabled) "关闭桌面歌词" else "桌面歌词",
+                action = ACTION_DESKTOP_LYRIC
+            ))
             .setStyle(
                 Notification.MediaStyle()
                     .setMediaSession(mediaSessionToken)
@@ -150,6 +155,7 @@ internal class PlaybackNotificationController(
         const val ACTION_TOGGLE = "com.silisten.app.action.PLAYBACK_TOGGLE"
         const val ACTION_PREVIOUS = "com.silisten.app.action.PLAYBACK_PREVIOUS"
         const val ACTION_NEXT = "com.silisten.app.action.PLAYBACK_NEXT"
+        const val ACTION_DESKTOP_LYRIC = "com.silisten.app.action.PLAYBACK_DESKTOP_LYRIC"
         const val ACTION_DISMISS = "com.silisten.app.action.PLAYBACK_DISMISS"
 
         private const val CHANNEL_ID = "silisten_playback"

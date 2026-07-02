@@ -59,6 +59,7 @@ enum class PlaylistKind {
     Album,
     Artist,
     LocalMusic,
+    LocalPlaylist,
     Donation
 }
 
@@ -69,7 +70,22 @@ data class PlaylistComment(
     val content: String,
     val timeLabel: String,
     val likedCount: Int = 0,
-    val replyCount: Int = 0
+    val replyCount: Int = 0,
+    val images: List<PlaylistCommentImage> = emptyList(),
+    val replies: List<PlaylistCommentReply> = emptyList()
+)
+
+data class PlaylistCommentImage(
+    val url: String,
+    val width: Int = 0,
+    val height: Int = 0
+)
+
+data class PlaylistCommentReply(
+    val authorName: String,
+    val content: String,
+    val timeLabel: String = "",
+    val likedCount: Int = 0
 )
 
 data class PlaylistCommentBundle(
