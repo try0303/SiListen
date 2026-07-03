@@ -9,6 +9,9 @@ local.properties
 .tmp*/
 *.zip
 
+dist/
+release-signing/
+
 *.apk
 *.ap_
 *.aab
