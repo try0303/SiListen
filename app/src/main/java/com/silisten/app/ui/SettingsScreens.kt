@@ -95,6 +95,7 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.Home
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.MusicNote
@@ -183,6 +184,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Dp
@@ -389,7 +391,7 @@ private fun SettingsHomeScreen(
         item {
             SettingsNavigationRow(
                 title = "音源与扩展",
-                subtitle = "切换默认音源，查看后续可扩展的音乐来源",
+                subtitle = "管理搜索模块、自定义源和播放解析策略",
                 mark = "云",
                 markColor = Color(0xFF8BD3FF),
                 cardColor = cardColor,
@@ -413,7 +415,7 @@ private fun SettingsHomeScreen(
         item {
             SettingsNavigationRow(
                 title = "关于 SiListen",
-                subtitle = "网易云默认音源，可继续扩展其他 API",
+                subtitle = "账号曲库与自定义接口协同工作的音乐客户端",
                 mark = "i",
                 markColor = Color(0xFF8BD3FF),
                 cardColor = cardColor,
@@ -649,37 +651,29 @@ private fun ThemeSettingsScreen(
                         ThemeDivider(dividerColor)
                         KernelSuDropdownPreference(
                             title = "色彩风格",
-                            subtitle = state.paletteStyle.label,
+                            selectedLabel = state.paletteStyle.label,
                             mark = "S",
                             textColor = titleColor,
-                            mutedColor = mutedColor
-                        ) {
-                            ThemePaletteStyleOption.entries.forEach { style ->
-                                ThemeOptionChip(
-                                    text = style.label,
-                                    selected = state.paletteStyle == style,
-                                    dark = dark,
-                                    onClick = { onPaletteStyleChange(style) }
-                                )
-                            }
-                        }
+                            mutedColor = mutedColor,
+                            dark = dark,
+                            options = ThemePaletteStyleOption.entries.toList(),
+                            selected = state.paletteStyle,
+                            optionLabel = { it.label },
+                            onSelect = onPaletteStyleChange
+                        )
                         ThemeDivider(dividerColor)
                         KernelSuDropdownPreference(
                             title = "色彩规范",
-                            subtitle = state.colorSpec.label,
+                            selectedLabel = state.colorSpec.label,
                             mark = "25",
                             textColor = titleColor,
-                            mutedColor = mutedColor
-                        ) {
-                            ThemeColorSpecOption.entries.forEach { spec ->
-                                ThemeOptionChip(
-                                    text = spec.label,
-                                    selected = state.colorSpec == spec,
-                                    dark = dark,
-                                    onClick = { onColorSpecChange(spec) }
-                                )
-                            }
-                        }
+                            mutedColor = mutedColor,
+                            dark = dark,
+                            options = ThemeColorSpecOption.entries.toList(),
+                            selected = state.colorSpec,
+                            optionLabel = { it.label },
+                            onSelect = onColorSpecChange
+                        )
                     }
                 }
             }
@@ -1122,17 +1116,12 @@ private fun SourceSettingsScreen(
                 fontWeight = FontWeight.Black,
                 modifier = Modifier.padding(top = 6.dp)
             )
-            Text(
-                text = "网易云继续负责评论、红心和歌单；播放地址优先交给你添加的脚本或接口解析。",
-                color = mutedColor,
-                style = MaterialTheme.typography.bodyMedium
-            )
         }
 
         item {
             SourceSettingsCard(
                 title = "自定义源优先",
-                subtitle = "启用后播放会先请求下方自定义音源，全部失败才回退网易云直链",
+                subtitle = "启用后播放会优先请求已启用的自定义源，全部失败后再回退默认解析",
                 iconText = "换",
                 panelColor = panelColor,
                 titleColor = titleColor,
@@ -1140,8 +1129,8 @@ private fun SourceSettingsScreen(
                 dark = dark
             ) {
                 SettingSwitchRow(
-                    title = "优先使用自定义音源播放",
-                    subtitle = "只替换播放 URL，歌曲身份仍保留网易云，评论、红心和歌单不受影响",
+                    title = "优先使用自定义源播放",
+                    subtitle = "只替换播放地址，歌曲身份、评论和收藏能力保持不变",
                     checked = settings.autoSourceFallbackEnabled,
                     titleColor = titleColor,
                     mutedColor = mutedColor,
@@ -1152,8 +1141,8 @@ private fun SourceSettingsScreen(
 
         item {
             SourceSettingsCard(
-                title = "平台搜索模块",
-                subtitle = "和 LX 一样，单曲搜索可以由多个平台模块共同参与；自定义音源只负责解析播放地址。",
+                title = "曲库搜索模块",
+                subtitle = "可按需开启多个内置搜索模块；自定义源只负责解析播放地址。",
                 iconText = "搜",
                 panelColor = panelColor,
                 titleColor = titleColor,
@@ -1163,7 +1152,7 @@ private fun SourceSettingsScreen(
                 Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                     BuiltInSearchPlatforms.forEach { platform ->
                         SettingSwitchRow(
-                            title = "${platform.label}（${platform.lxId}）",
+                            title = platform.label,
                             subtitle = platform.description,
                             checked = platform.id in settings.enabledSearchPlatformIds,
                             titleColor = titleColor,
@@ -1179,8 +1168,8 @@ private fun SourceSettingsScreen(
 
         item {
             SourceSettingsCard(
-                title = "平台评论模块",
-                subtitle = "播放页评论会优先按歌曲自身平台读取，不再把所有歌曲都硬套到网易云评论。",
+                title = "评论模块",
+                subtitle = "播放页评论会按歌曲身份读取对应模块。",
                 iconText = "评",
                 panelColor = panelColor,
                 titleColor = titleColor,
@@ -1190,12 +1179,8 @@ private fun SourceSettingsScreen(
                 Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                     BuiltInCommentPlatforms.forEach { platform ->
                         SettingSwitchRow(
-                            title = "${platform.label}（${platform.lxId}）",
-                            subtitle = if (platform.id == "netease") {
-                                "网易云歌曲、红心、歌单收藏和账号歌单仍使用网易云身份。"
-                            } else {
-                                "${platform.label}歌曲会读取对应平台评论；红心和加入网易云歌单不会被强制绑定。"
-                            },
+                            title = platform.label,
+                            subtitle = "开启后，具备对应身份的歌曲可读取该模块评论。",
                             checked = platform.id in settings.enabledCommentPlatformIds,
                             titleColor = titleColor,
                             mutedColor = mutedColor,
@@ -1210,9 +1195,9 @@ private fun SourceSettingsScreen(
 
         item {
             SourceSettingsCard(
-                title = "自定义源管理（实验性）",
-                subtitle = "像 LX Music 一样导入脚本源，并显示版本、作者和更新提醒设置",
-                iconText = "API",
+                title = "自定义源管理",
+                subtitle = "导入兼容 LX 协议的脚本源，管理版本、作者和更新提醒",
+                iconText = "源",
                 panelColor = panelColor,
                 titleColor = titleColor,
                 mutedColor = mutedColor,
@@ -1221,7 +1206,7 @@ private fun SourceSettingsScreen(
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     if (settings.customSources.isEmpty()) {
                         Text(
-                            "还没有自定义源。导入 LX 脚本后会优先参与播放地址解析。",
+                            "暂无自定义源。导入兼容 LX 协议的脚本后，可用于播放地址解析。",
                             color = mutedColor,
                             style = MaterialTheme.typography.bodyMedium
                         )
@@ -1236,31 +1221,12 @@ private fun SourceSettingsScreen(
                             overflow = TextOverflow.Ellipsis
                         )
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                        Button(
-                            onClick = { showSourceManager = true },
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                        ) {
-                            Text("自定义源管理")
-                        }
-                        Button(
-                            onClick = {
-                                editingSource = CustomSourceConfig(
-                                    id = "",
-                                    name = "直接播放接口",
-                                    endpoint = "",
-                                    enabled = true,
-                                    type = CustomPlaybackSourceType.DirectHttp
-                                )
-                            },
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (dark) Color.White.copy(alpha = 0.12f) else Color(0xFFE9EAEE)
-                            )
-                        ) {
-                            Text("高级编辑", color = titleColor)
-                        }
+                    Button(
+                        onClick = { showSourceManager = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                    ) {
+                        Text("管理自定义源")
                     }
                 }
             }
@@ -1268,18 +1234,18 @@ private fun SourceSettingsScreen(
 
         item {
             SourceSettingsCard(
-                title = "网易云账号能力",
-                subtitle = "评论、红心和加入歌单都继续走网易云账号体系",
-                iconText = "易",
+                title = "账号能力",
+                subtitle = "评论、红心和加入歌单继续走账号体系",
+                iconText = "账",
                 panelColor = panelColor,
                 titleColor = titleColor,
                 mutedColor = mutedColor,
                 dark = dark
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    NeteaseAbilityRow("评论", "优先使用网易云 ID 展示歌曲评论，换源后仍保留评论入口", titleColor, mutedColor)
-                    NeteaseAbilityRow("喜欢与歌单", "红心、加入歌单、歌单收藏继续同步网易云", titleColor, mutedColor)
-                    NeteaseAbilityRow("身份桥接", "网易云 VIP 或灰色歌曲换源播放时，仍使用原网易云歌曲身份", titleColor, mutedColor)
+                    NeteaseAbilityRow("评论", "优先使用账号歌曲身份展示评论，换源后仍保留评论入口", titleColor, mutedColor)
+                    NeteaseAbilityRow("喜欢与歌单", "红心、加入歌单和歌单收藏继续同步到账号", titleColor, mutedColor)
+                    NeteaseAbilityRow("身份桥接", "需要换源播放时，仍尽量保留原歌曲身份", titleColor, mutedColor)
                 }
             }
         }
@@ -1390,7 +1356,7 @@ private fun CustomSourceManagerDialog(
         title = {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                 Text(
-                    "自定义源管理（实验性）",
+                    "自定义源管理",
                     color = titleColor,
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Black,
@@ -1405,7 +1371,7 @@ private fun CustomSourceManagerDialog(
             Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 if (settings.customSources.isEmpty()) {
                     Text(
-                        "这里还没有自定义源。导入 LX 音源脚本后，会显示名称、版本、作者和可用播放源。",
+                        "暂无自定义源。导入后会显示名称、版本、作者和可用模块。",
                         color = mutedColor,
                         style = MaterialTheme.typography.bodyMedium
                     )
@@ -1436,14 +1402,23 @@ private fun CustomSourceManagerDialog(
                     Text("源编写说明：", color = titleColor, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        "LX 自定义源协议",
+                        "LX自定义源协议",
                         color = MaterialTheme.colorScheme.primary,
                         style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
+                        textDecoration = TextDecoration.Underline,
+                        modifier = Modifier.noRippleClick(RoundedCornerShape(6.dp)) {
+                            context.startActivity(
+                                Intent(
+                                    Intent.ACTION_VIEW,
+                                    Uri.parse("https://lxmusic.toside.cn/mobile/custom-source")
+                                )
+                            )
+                        }
                     )
                 }
                 Text(
-                    "提示：脚本运行环境已尽量隔离，但导入来源不明的脚本仍可能带来风险，请只导入你信任的源。",
+                    "请仅导入可信来源的脚本。自定义源仅用于解析播放地址，请遵守所在地相关法律法规。",
                     color = mutedColor,
                     style = MaterialTheme.typography.bodySmall
                 )
@@ -1583,7 +1558,7 @@ private fun OnlineSourceImportDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    "粘贴 LX 自定义源脚本链接，SiListen 会下载脚本、识别源信息并加入管理列表。",
+                    "粘贴兼容 LX 协议的自定义源脚本链接，应用会识别源信息并加入管理列表。",
                     color = mutedColor,
                     style = MaterialTheme.typography.bodyMedium
                 )
@@ -2322,64 +2297,136 @@ private fun KernelSuKeyColorPreference(
 ) {
     val titleColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
     val mutedColor = if (dark) Color(0xFFAAC0B0) else Color(0xFF6A6D72)
-    Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            ThemeRowMark("●")
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text("关键色", color = titleColor, fontWeight = FontWeight.Bold)
-                Text(state.accent.label, color = mutedColor, style = MaterialTheme.typography.bodySmall)
-            }
-        }
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            items(ThemeAccentOption.entries) { accent ->
-                val selected = accent == state.accent
-                val color = accent.color
-                Surface(
-                    color = if (selected) color.copy(alpha = 0.18f) else if (dark) Color.White.copy(alpha = 0.06f) else Color(0xFFF2F3F6),
-                    border = BorderStroke(1.dp, if (selected) color else Color.Transparent),
-                    shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier.noRippleClick(RoundedCornerShape(16.dp)) { onAccentChange(accent) }
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Box(Modifier.size(14.dp).clip(CircleShape).background(color))
-                        Text(
-                            accent.label,
-                            color = titleColor,
-                            fontWeight = if (selected) FontWeight.Black else FontWeight.SemiBold,
-                            style = MaterialTheme.typography.labelMedium
-                        )
+    var expanded by remember { mutableStateOf(false) }
+    Box(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+        ThemeDropdownAnchor(
+            title = "关键色",
+            selectedLabel = state.accent.label,
+            mark = "●",
+            textColor = titleColor,
+            mutedColor = mutedColor,
+            dark = dark,
+            leading = {
+                Box(Modifier.size(15.dp).clip(CircleShape).background(state.accent.color))
+            },
+            onClick = { expanded = true }
+        )
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            containerColor = if (dark) Color(0xFF1A211B) else Color.White
+        ) {
+            ThemeAccentOption.entries.forEach { accent ->
+                DropdownMenuItem(
+                    text = {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Box(Modifier.size(14.dp).clip(CircleShape).background(accent.color))
+                            Text(accent.label, color = titleColor, fontWeight = FontWeight.SemiBold)
+                        }
+                    },
+                    trailingIcon = {
+                        if (accent == state.accent) {
+                            Text("已选", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                        }
+                    },
+                    onClick = {
+                        expanded = false
+                        onAccentChange(accent)
                     }
-                }
+                )
             }
         }
     }
 }
 
 @Composable
-private fun KernelSuDropdownPreference(
+private fun <T> KernelSuDropdownPreference(
     title: String,
-    subtitle: String,
+    selectedLabel: String,
     mark: String,
     textColor: Color,
     mutedColor: Color,
-    content: @Composable RowScope.() -> Unit
+    dark: Boolean,
+    options: List<T>,
+    selected: T,
+    optionLabel: (T) -> String,
+    onSelect: (T) -> Unit
 ) {
-    Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+    var expanded by remember { mutableStateOf(false) }
+    Box(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+        ThemeDropdownAnchor(
+            title = title,
+            selectedLabel = selectedLabel,
+            mark = mark,
+            textColor = textColor,
+            mutedColor = mutedColor,
+            dark = dark,
+            onClick = { expanded = true }
+        )
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            containerColor = if (dark) Color(0xFF1A211B) else Color.White
+        ) {
+            options.forEach { option ->
+                val active = option == selected
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            optionLabel(option),
+                            color = textColor,
+                            fontWeight = if (active) FontWeight.Black else FontWeight.SemiBold
+                        )
+                    },
+                    trailingIcon = {
+                        if (active) {
+                            Text("已选", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                        }
+                    },
+                    onClick = {
+                        expanded = false
+                        onSelect(option)
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ThemeDropdownAnchor(
+    title: String,
+    selectedLabel: String,
+    mark: String,
+    textColor: Color,
+    mutedColor: Color,
+    dark: Boolean,
+    leading: (@Composable () -> Unit)? = null,
+    onClick: () -> Unit
+) {
+    Surface(
+        color = if (dark) Color.White.copy(alpha = 0.05f) else Color(0xFFF4F5F7),
+        border = BorderStroke(1.dp, if (dark) Color.White.copy(alpha = 0.08f) else Color(0xFFE7E8EC)),
+        shape = RoundedCornerShape(18.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .noRippleClick(RoundedCornerShape(18.dp), onClick)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             ThemeRowMark(mark)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(title, color = textColor, fontWeight = FontWeight.Bold)
-                Text(subtitle, color = mutedColor, style = MaterialTheme.typography.bodySmall)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    leading?.invoke()
+                    Text(selectedLabel, color = mutedColor, style = MaterialTheme.typography.bodySmall)
+                }
             }
-            Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = mutedColor)
+            Icon(Icons.Rounded.KeyboardArrowDown, contentDescription = null, tint = mutedColor)
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), content = content)
     }
 }
 
@@ -2467,53 +2514,6 @@ private val ThemeAccentOption.color: Color
         ThemeAccentOption.Violet -> Color(0xFF8F6BFF)
     }
 
-@Composable
-private fun ThemeAdvancedColorOptions(
-    state: ThemeSettingsState,
-    dark: Boolean,
-    onPaletteStyleChange: (ThemePaletteStyleOption) -> Unit,
-    onColorSpecChange: (ThemeColorSpecOption) -> Unit
-) {
-    val titleColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
-    val mutedColor = if (dark) Color(0xFFAAC0B0) else Color(0xFF6A6D72)
-    Surface(
-        color = if (dark) Color(0xFF121A14) else Color.White,
-        shape = RoundedCornerShape(22.dp),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Text("动态色算法", color = titleColor, fontWeight = FontWeight.Black)
-            Text(
-                "调整关键色生成主题时的取色倾向，让界面更贴近你的偏好。",
-                color = mutedColor,
-                style = MaterialTheme.typography.bodySmall
-            )
-            Text("色彩风格", color = mutedColor, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(ThemePaletteStyleOption.entries) { style ->
-                    ThemeOptionChip(
-                        text = style.label,
-                        selected = state.paletteStyle == style,
-                        dark = dark,
-                        onClick = { onPaletteStyleChange(style) }
-                    )
-                }
-            }
-            Text("色彩规范", color = mutedColor, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ThemeColorSpecOption.entries.forEach { spec ->
-                    ThemeOptionChip(
-                        text = spec.label,
-                        selected = state.colorSpec == spec,
-                        dark = dark,
-                        onClick = { onColorSpecChange(spec) }
-                    )
-                }
-            }
-        }
-    }
-}
-
 private val ThemePaletteStyleOption.label: String
     get() = when (this) {
         ThemePaletteStyleOption.TonalSpot -> "柔和色调"
@@ -2530,28 +2530,6 @@ private val ThemeColorSpecOption.label: String
         ThemeColorSpecOption.Spec2021 -> "2021 规范"
         ThemeColorSpecOption.Spec2025 -> "2025 规范"
     }
-
-@Composable
-private fun ThemeOptionChip(
-    text: String,
-    selected: Boolean,
-    dark: Boolean,
-    onClick: () -> Unit
-) {
-    Surface(
-        color = if (selected) MaterialTheme.colorScheme.primary else if (dark) Color.White.copy(alpha = 0.08f) else Color(0xFFF0F1F4),
-        contentColor = if (selected) MaterialTheme.colorScheme.onPrimary else if (dark) Color(0xFFE9F7EC) else Color(0xFF111111),
-        shape = RoundedCornerShape(999.dp),
-        modifier = Modifier.noRippleClick(RoundedCornerShape(999.dp), onClick)
-    ) {
-        Text(
-            text = text,
-            fontWeight = if (selected) FontWeight.Black else FontWeight.Bold,
-            style = MaterialTheme.typography.labelMedium,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
-        )
-    }
-}
 
 @Composable
 private fun RowScope.ThemeModeSegment(

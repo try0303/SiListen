@@ -23,6 +23,17 @@ interface PagedMusicSearchSource {
     suspend fun searchSongs(keyword: String, limit: Int, offset: Int): List<Song>
 }
 
+interface CollectionSearchSource {
+    suspend fun searchPlaylists(keyword: String, limit: Int, offset: Int): List<MusicPlaylist> = emptyList()
+    suspend fun searchAlbums(keyword: String, limit: Int, offset: Int): List<MusicPlaylist> = emptyList()
+    suspend fun searchArtists(keyword: String, limit: Int, offset: Int): List<MusicPlaylist> = emptyList()
+}
+
+interface CollectionDetailSource {
+    suspend fun playlistDetail(playlist: MusicPlaylist): MusicPlaylist = playlist
+    suspend fun artistSongs(artist: MusicPlaylist, limit: Int, offset: Int): List<Song> = emptyList()
+}
+
 interface SongCommentSource {
     suspend fun commentsForSong(
         song: Song,

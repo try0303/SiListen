@@ -108,6 +108,7 @@ import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material.icons.rounded.Subtitles
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -120,6 +121,7 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -429,6 +431,7 @@ fun SearchScreen(
     onOpenPlaylist: ((MusicPlaylist) -> Unit)? = null
 ) {
     val dark = uiState.themeSettings.resolveDarkTheme()
+    val context = LocalContext.current
     val searchFocusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
     val tabs = SearchResultTab.entries
@@ -490,6 +493,24 @@ fun SearchScreen(
         playlistsListState.scrollToItem(0)
         albumsListState.scrollToItem(0)
         artistsListState.scrollToItem(0)
+    }
+    val collectionArtworkUrls = remember(playlists, albumResults, artistResults) {
+        (playlists + albumResults + artistResults)
+            .map { it.coverUrl }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .take(18)
+    }
+    LaunchedEffect(collectionArtworkUrls) {
+        if (collectionArtworkUrls.isEmpty()) return@LaunchedEffect
+        val imageLoader = ImageLoader(context)
+        collectionArtworkUrls.forEach { url ->
+            val request = ImageRequest.Builder(context)
+                .data(url)
+                .size(160)
+                .build()
+            runCatching { imageLoader.execute(request) }
+        }
     }
     LaunchedEffect(
         selectedListState,
@@ -679,7 +700,7 @@ fun SearchScreen(
                                 SearchCollectionResultRow(
                                     playlist = artist,
                                     dark = dark,
-                                    subtitle = artist.subtitle,
+                                    subtitle = artist.searchArtistSubtitle(),
                                     artworkShape = CircleShape,
                                     fallbackIcon = Icons.Rounded.AccountCircle,
                                     onClick = { openPlaylistFromSearch(artist) }
@@ -903,6 +924,18 @@ private fun SearchCategoryTabs(
     }
 }
 
+private fun MusicPlaylist.searchArtistSubtitle(): String {
+    val total = songCount.coerceAtLeast(songs.size)
+    val fallback = subtitle.takeIf {
+        it.isNotBlank() && it != "歌手"
+    }
+    return listOfNotNull(
+        total.takeIf { it > 0 }?.let { "$it 首单曲" },
+        albumCount.takeIf { it > 0 }?.let { "$it 张专辑" },
+        fallback
+    ).joinToString(" · ").ifBlank { "歌手" }
+}
+
 @Composable
 private fun SearchSongResultRow(
     index: Int,
@@ -916,6 +949,8 @@ private fun SearchSongResultRow(
 ) {
     val titleColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
     val mutedText = if (dark) Color.White.copy(alpha = 0.54f) else Color(0xFF676A70)
+    val rankLabel = if (index > 99) "99+" else index.toString()
+    val rankStyle = if (index > 99) MaterialTheme.typography.titleSmall else MaterialTheme.typography.titleLarge
     val heartTint by animateColorAsState(
         targetValue = if (liked) Color(0xFFFF5C7C) else mutedText,
         animationSpec = spring(dampingRatio = 0.72f, stiffness = 520f),
@@ -929,9 +964,9 @@ private fun SearchSongResultRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
-            text = index.toString(),
-            color = titleColor,
-            style = MaterialTheme.typography.titleLarge,
+            text = rankLabel,
+            color = if (index > 99) mutedText else titleColor,
+            style = rankStyle,
             fontWeight = FontWeight.Bold,
             textAlign = TextAlign.Center,
             modifier = Modifier.width(38.dp)
@@ -1070,19 +1105,18 @@ private fun SearchArtwork(
             .background(Color(0xFF2A2A2A)),
         contentAlignment = Alignment.Center
     ) {
+        Icon(
+            fallbackIcon,
+            contentDescription = null,
+            tint = Color.White.copy(alpha = 0.72f),
+            modifier = Modifier.size(28.dp)
+        )
         if (url.isNotBlank()) {
             AsyncImage(
                 model = url,
                 contentDescription = title,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
-            )
-        } else {
-            Icon(
-                fallbackIcon,
-                contentDescription = null,
-                tint = Color.White.copy(alpha = 0.72f),
-                modifier = Modifier.size(28.dp)
             )
         }
     }
@@ -1179,11 +1213,7 @@ fun SourcesScreen(
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
-            PageHeroCard(
-                title = "音乐库",
-                subtitle = "这里先专注本地音乐和你的媒体库入口，音源切换移到设置里统一管理。",
-                dark = dark
-            )
+            PageTopTitle("音乐库", dark = dark)
         }
         item {
             Surface(
@@ -1203,7 +1233,6 @@ fun SourcesScreen(
                                 fontWeight = FontWeight.Black,
                                 style = MaterialTheme.typography.titleLarge
                             )
-                            Text("扫描设备中的音频文件并加入 SiListen。", color = mutedText, style = MaterialTheme.typography.bodySmall)
                         }
                         PrimaryActionButton(
                             text = "扫描",
@@ -1249,7 +1278,8 @@ fun SourcesScreen(
                         playlists = uiState.localPlaylists,
                         dark = dark,
                         onCreate = viewModel::createLocalPlaylist,
-                        onOpenPlaylist = viewModel::openPlaylist
+                        onOpenPlaylist = viewModel::openPlaylist,
+                        onDeletePlaylist = viewModel::deleteLocalPlaylist
                     )
                 }
             }
@@ -1286,10 +1316,6 @@ fun AccountScreen(
             )
         }
     }
-    val audioPermission = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO else Manifest.permission.READ_EXTERNAL_STORAGE
-    val localPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
-        viewModel.scanLocalMusic()
-    }
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -1304,27 +1330,6 @@ fun AccountScreen(
     ) {
         item {
             PageTopTitle("资料库", dark = dark)
-        }
-        item {
-            AccountLocalMusicCard(
-                uiState = uiState,
-                dark = dark,
-                onScan = { localPermissionLauncher.launch(audioPermission) },
-                onOpenAll = {
-                    viewModel.openPlaylist(
-                        MusicPlaylist(
-                            id = "local-library",
-                            title = "本地音乐",
-                            subtitle = uiState.localMusicMessage,
-                            coverUrl = "",
-                            songs = uiState.localSongs,
-                            kind = PlaylistKind.LocalMusic
-                        )
-                    )
-                },
-                onCreateLocalPlaylist = viewModel::createLocalPlaylist,
-                onOpenPlaylist = viewModel::openPlaylist
-            )
         }
         item {
             AccountSettingsPanel(
@@ -1404,7 +1409,7 @@ fun AccountScreen(
                             SecondaryActionButton(
                                 text = "同步内容",
                                 dark = dark,
-                                onClick = viewModel::refreshLibrary
+                                onClick = viewModel::syncAccountContent
                             )
                             PrimaryActionButton(
                                 text = "退出登录",
@@ -1474,85 +1479,15 @@ fun AccountScreen(
 }
 
 @Composable
-private fun AccountLocalMusicCard(
-    uiState: SiListenUiState,
-    dark: Boolean,
-    onScan: () -> Unit,
-    onOpenAll: () -> Unit,
-    onCreateLocalPlaylist: (String) -> Unit,
-    onOpenPlaylist: (MusicPlaylist) -> Unit
-) {
-    val titleColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
-    val mutedText = if (dark) Color(0xFFB8C1B9) else Color(0xFF5F6368)
-    Surface(
-        color = if (dark) Color.White.copy(alpha = 0.08f) else Color.White,
-        border = BorderStroke(1.dp, if (dark) Color.White.copy(alpha = 0.12f) else Color(0xFFE7E7EA)),
-        shape = RoundedCornerShape(28.dp),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(52.dp)
-                        .clip(RoundedCornerShape(18.dp))
-                        .background(Color(0xFF8BD3FF).copy(alpha = if (dark) 0.22f else 0.16f)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(Icons.Rounded.LibraryMusic, contentDescription = null, tint = Color(0xFF35A6D8))
-                }
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        text = "本地音乐",
-                        color = titleColor,
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Black
-                    )
-                    Text(
-                        text = uiState.localMusicMessage,
-                        color = mutedText,
-                        style = MaterialTheme.typography.bodySmall,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                PrimaryActionButton(
-                    text = "扫描",
-                    onClick = onScan,
-                    containerColor = Color(0xFF8BD3FF),
-                    contentColor = Color(0xFF061018)
-                )
-            }
-            if (uiState.localSongs.isNotEmpty()) {
-                SecondaryActionButton(
-                    text = "查看全部本地歌曲",
-                    dark = dark,
-                    onClick = onOpenAll,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-            LocalPlaylistLibrarySection(
-                playlists = uiState.localPlaylists,
-                dark = dark,
-                onCreate = onCreateLocalPlaylist,
-                onOpenPlaylist = onOpenPlaylist
-            )
-        }
-    }
-}
-
-@Composable
 private fun LocalPlaylistLibrarySection(
     playlists: List<MusicPlaylist>,
     dark: Boolean,
     onCreate: (String) -> Unit,
-    onOpenPlaylist: (MusicPlaylist) -> Unit
+    onOpenPlaylist: (MusicPlaylist) -> Unit,
+    onDeletePlaylist: (MusicPlaylist) -> Unit
 ) {
     var title by remember { mutableStateOf("") }
+    var pendingDeletePlaylist by remember { mutableStateOf<MusicPlaylist?>(null) }
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         SectionBulletTitle("本地歌单库", dark = dark)
         Row(
@@ -1591,10 +1526,33 @@ private fun LocalPlaylistLibrarySection(
                     playlist = playlist,
                     subtitle = playlist.subtitle.ifBlank { "本地歌单 · ${playlist.songs.size} 首" },
                     dark = dark,
-                    onClick = { onOpenPlaylist(playlist) }
+                    onClick = { onOpenPlaylist(playlist) },
+                    onLongClick = { pendingDeletePlaylist = playlist }
                 )
             }
         }
+    }
+    pendingDeletePlaylist?.let { playlist ->
+        AlertDialog(
+            onDismissRequest = { pendingDeletePlaylist = null },
+            title = { Text("删除本地歌单？") },
+            text = { Text("将删除「${playlist.title}」，歌单里的歌曲文件不会被删除。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        pendingDeletePlaylist = null
+                        onDeletePlaylist(playlist)
+                    }
+                ) {
+                    Text("删除")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeletePlaylist = null }) {
+                    Text("取消")
+                }
+            }
+        )
     }
 }
 
@@ -2119,17 +2077,30 @@ private fun AccountLibraryRow(
     playlist: MusicPlaylist,
     subtitle: String,
     dark: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null
 ) {
     val container = if (dark) Color.White.copy(alpha = 0.08f) else Color.White
     val muted = if (dark) Color(0xFFB8C1B9) else Color(0xFF6E7176)
+    val shape = RoundedCornerShape(24.dp)
+    val longClick = onLongClick
+    val clickModifier = if (longClick == null) {
+        Modifier.noRippleClick(shape = shape, onClick = onClick)
+    } else {
+        Modifier.pointerInput(onClick, longClick) {
+            detectTapGestures(
+                onTap = { onClick() },
+                onLongPress = { longClick() }
+            )
+        }
+    }
     Surface(
         color = container,
         border = BorderStroke(1.dp, if (dark) Color.White.copy(alpha = 0.10f) else Color(0xFFECECEF)),
-        shape = RoundedCornerShape(24.dp),
+        shape = shape,
         modifier = Modifier
             .fillMaxWidth()
-            .noRippleClick(shape = RoundedCornerShape(24.dp), onClick = onClick)
+            .then(clickModifier)
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),

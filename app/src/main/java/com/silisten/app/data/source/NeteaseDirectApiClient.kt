@@ -249,6 +249,18 @@ internal class NeteaseDirectApiClient(
                 )
             )
 
+            "/playlist/subscribe" -> {
+                val subscribe = request.param("t", "1") == "1"
+                val apiPath = if (subscribe) "/eapi/playlist/subscribe" else "/eapi/playlist/unsubscribe"
+                val data = mutableMapOf<String, Any?>("id" to request.param("id"))
+                if (subscribe) data["checkToken"] = true
+                postEApi(
+                    requestPath = apiPath,
+                    encryptPath = apiPath.removePrefix("/eapi").let { "/api$it" },
+                    data = data
+                )
+            }
+
             "/user/cloud" -> postWeApi(
                 "/weapi/v1/cloud/get",
                 mapOf(

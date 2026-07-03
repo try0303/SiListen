@@ -15,6 +15,8 @@ import com.silisten.app.data.model.withCanonicalIdentity
 import com.silisten.app.data.model.withPlaybackSource
 import com.silisten.app.data.source.CustomPlaybackSourceClient
 import com.silisten.app.data.source.CustomSourceInspectResult
+import com.silisten.app.data.source.CollectionDetailSource
+import com.silisten.app.data.source.CollectionSearchSource
 import com.silisten.app.data.source.MusicSource
 import com.silisten.app.data.source.MusicSourceRegistry
 import com.silisten.app.data.source.NeteaseActionResult
@@ -47,6 +49,10 @@ class MusicRepository(
 
     suspend fun importCustomSourceScript(url: String) =
         customPlaybackSourceClient.importLxScriptFromUrl(url)
+
+    fun clearNeteaseLibraryCache() {
+        netease().clearLibraryCache()
+    }
 
     suspend fun featured(sourceId: String): List<MusicPlaylist> =
         if (sourceId == SourcePlatformIds.ALL) source(defaultSourceId()).featured() else source(sourceId).featured()
@@ -105,10 +111,16 @@ class MusicRepository(
         sourceId: String,
         query: String,
         limit: Int,
-        offset: Int
+        offset: Int,
+        sourceSettings: SourceSettingsState? = null
     ): List<MusicPlaylist> {
+        if (sourceId == SourcePlatformIds.ALL) {
+            return searchCollectionsAcrossEnabledSources(query, limit, offset, sourceSettings) { source, keyword, pageLimit, pageOffset ->
+                source.searchPlaylists(keyword, pageLimit, pageOffset)
+            }
+        }
         val source = source(sourceId)
-        return if (source is NeteaseMusicSource) {
+        return if (source is CollectionSearchSource) {
             withTimeoutOrNull(COLLECTION_SEARCH_TIMEOUT_MS) {
                 source.searchPlaylists(query, limit, offset)
             }.orEmpty()
@@ -121,10 +133,16 @@ class MusicRepository(
         sourceId: String,
         query: String,
         limit: Int,
-        offset: Int
+        offset: Int,
+        sourceSettings: SourceSettingsState? = null
     ): List<MusicPlaylist> {
+        if (sourceId == SourcePlatformIds.ALL) {
+            return searchCollectionsAcrossEnabledSources(query, limit, offset, sourceSettings) { source, keyword, pageLimit, pageOffset ->
+                source.searchAlbums(keyword, pageLimit, pageOffset)
+            }
+        }
         val source = source(sourceId)
-        return if (source is NeteaseMusicSource) {
+        return if (source is CollectionSearchSource) {
             withTimeoutOrNull(COLLECTION_SEARCH_TIMEOUT_MS) {
                 source.searchAlbums(query, limit, offset)
             }.orEmpty()
@@ -137,10 +155,16 @@ class MusicRepository(
         sourceId: String,
         query: String,
         limit: Int,
-        offset: Int
+        offset: Int,
+        sourceSettings: SourceSettingsState? = null
     ): List<MusicPlaylist> {
+        if (sourceId == SourcePlatformIds.ALL) {
+            return searchCollectionsAcrossEnabledSources(query, limit, offset, sourceSettings) { source, keyword, pageLimit, pageOffset ->
+                source.searchArtists(keyword, pageLimit, pageOffset)
+            }
+        }
         val source = source(sourceId)
-        return if (source is NeteaseMusicSource) {
+        return if (source is CollectionSearchSource) {
             withTimeoutOrNull(COLLECTION_SEARCH_TIMEOUT_MS) {
                 source.searchArtists(query, limit, offset)
             }.orEmpty()
@@ -219,11 +243,56 @@ class MusicRepository(
     suspend fun neteasePlaylistDetail(playlist: MusicPlaylist): MusicPlaylist =
         netease().playlistDetail(playlist)
 
+    suspend fun playlistDetail(playlist: MusicPlaylist): MusicPlaylist {
+        val sourceId = playlist.collectionSourceId()
+        val source = registry.findById(sourceId)
+        val loaded = if (source is CollectionDetailSource) {
+            withTimeoutOrNull(COLLECTION_DETAIL_TIMEOUT_MS) {
+                runCatching { source.playlistDetail(playlist) }.getOrNull()
+            }
+        } else {
+            null
+        }
+        val detail = loaded ?: playlist
+        if (detail.songs.isNotEmpty()) return detail.withPlayableSummary()
+
+        val fallbackSongs = searchSongs(
+            sourceId = sourceId,
+            query = detail.collectionFallbackQuery(),
+            limit = 50,
+            offset = 0,
+            sourceSettings = null
+        )
+        return detail.copy(
+            subtitle = if (fallbackSongs.isEmpty()) detail.subtitle else "${fallbackSongs.size} 首歌曲",
+            coverUrl = detail.coverUrl.ifBlank { fallbackSongs.firstOrNull()?.coverUrl.orEmpty() },
+            songs = fallbackSongs
+        )
+    }
+
     suspend fun neteaseArtistSongs(
         artist: MusicPlaylist,
         limit: Int,
         offset: Int
     ): List<Song> = netease().artistSongs(artist, limit, offset)
+
+    suspend fun artistSongs(
+        artist: MusicPlaylist,
+        limit: Int,
+        offset: Int
+    ): List<Song> {
+        val sourceId = artist.collectionSourceId()
+        val source = registry.findById(sourceId)
+        val songs = if (source is CollectionDetailSource) {
+            withTimeoutOrNull(COLLECTION_DETAIL_TIMEOUT_MS) {
+                runCatching { source.artistSongs(artist, limit, offset) }.getOrDefault(emptyList())
+            }.orEmpty()
+        } else {
+            emptyList()
+        }
+        if (songs.isNotEmpty()) return songs
+        return searchSongs(sourceId, artist.title, limit, offset, null)
+    }
 
     suspend fun neteaseLikedSongs(userId: Long): MusicPlaylist =
         netease().likedSongs(userId)
@@ -328,6 +397,57 @@ class MusicRepository(
         }
     }
 
+    private suspend fun searchCollectionsAcrossEnabledSources(
+        query: String,
+        limit: Int,
+        offset: Int,
+        sourceSettings: SourceSettingsState? = null,
+        search: suspend (CollectionSearchSource, String, Int, Int) -> List<MusicPlaylist>
+    ): List<MusicPlaylist> {
+        val searchableIds = sourceSettings.searchPlatformIds()
+        val perSourceLimit = collectionPerSourceLimit(limit, searchableIds.size)
+        val perSourceOffset = collectionPerSourceOffset(offset, searchableIds.size)
+        return coroutineScope {
+            val searchJobs: List<Deferred<List<MusicPlaylist>>> = searchableIds.mapNotNull { sourceId ->
+                (registry.findById(sourceId) as? CollectionSearchSource)?.let { source ->
+                    async<List<MusicPlaylist>> {
+                        runCatching {
+                            withTimeoutOrNull(COLLECTION_SEARCH_TIMEOUT_MS) {
+                                search(source, query, perSourceLimit, perSourceOffset)
+                            }.orEmpty()
+                        }.getOrDefault(emptyList())
+                    }
+                }
+            }
+            searchJobs.awaitAll()
+                .interleavePlaylists()
+                .distinctBy { it.id }
+                .take(limit)
+        }
+    }
+
+    private fun collectionPerSourceLimit(limit: Int, sourceCount: Int): Int {
+        if (sourceCount <= 1) return limit.coerceAtMost(30)
+        val balancedLimit = (limit.coerceAtLeast(1) + sourceCount - 1) / sourceCount + 2
+        return balancedLimit.coerceIn(3, 8)
+    }
+
+    private fun collectionPerSourceOffset(offset: Int, sourceCount: Int): Int =
+        if (sourceCount <= 1) {
+            offset.coerceAtLeast(0)
+        } else {
+            (offset.coerceAtLeast(0) / sourceCount).coerceAtLeast(0)
+        }
+
+    private fun List<List<MusicPlaylist>>.interleavePlaylists(): List<MusicPlaylist> = buildList {
+        val maxSize = this@interleavePlaylists.maxOfOrNull { it.size } ?: 0
+        for (index in 0 until maxSize) {
+            for (playlists in this@interleavePlaylists) {
+                playlists.getOrNull(index)?.let(::add)
+            }
+        }
+    }
+
     private fun List<LyricLine>.hasUsableLyrics(): Boolean =
         any { line ->
             val text = line.text.trim()
@@ -349,6 +469,32 @@ class MusicRepository(
             SourcePlatformIds.MIGU
         ).filter { it in enabled && registry.findById(it) != null }
     }
+
+    private fun MusicPlaylist.collectionSourceId(): String =
+        id.substringBefore('-', missingDelimiterValue = "")
+            .takeIf { it in collectionSourceIds }
+            ?: songs.firstOrNull()?.sourceId
+            ?: defaultSourceId()
+
+    private fun MusicPlaylist.collectionFallbackQuery(): String =
+        when {
+            title.isNotBlank() && subtitle.isNotBlank() -> "$title $subtitle"
+            title.isNotBlank() -> title
+            else -> subtitle
+        }.trim().ifBlank { "华语流行" }
+
+    private fun MusicPlaylist.withPlayableSummary(): MusicPlaylist =
+        copy(
+            subtitle = when {
+                songs.isEmpty() -> subtitle
+                kind == com.silisten.app.data.model.PlaylistKind.Artist -> {
+                    val total = songCount.coerceAtLeast(songs.size)
+                    if (total > 0) "$total 首单曲" else subtitle
+                }
+                else -> "${songs.size} 首歌曲"
+            },
+            coverUrl = coverUrl.ifBlank { songs.firstOrNull()?.coverUrl.orEmpty() }
+        )
 
     private suspend fun findFallbackLyrics(song: Song): List<LyricLine> {
         for (candidate in song.lyricIdentityCandidates()) {
@@ -535,10 +681,18 @@ class MusicRepository(
             .toSet()
 
     private companion object {
-        const val SINGLE_SOURCE_SEARCH_TIMEOUT_MS = 4_500L
-        const val MULTI_SOURCE_SEARCH_TIMEOUT_MS = 3_200L
-        const val COLLECTION_SEARCH_TIMEOUT_MS = 4_000L
+        const val SINGLE_SOURCE_SEARCH_TIMEOUT_MS = 3_800L
+        const val MULTI_SOURCE_SEARCH_TIMEOUT_MS = 2_800L
+        const val COLLECTION_SEARCH_TIMEOUT_MS = 2_600L
+        const val COLLECTION_DETAIL_TIMEOUT_MS = 6_000L
         const val LYRIC_MATCH_SEARCH_TIMEOUT_MS = 3_000L
         const val LYRIC_MATCH_MIN_SCORE = 74
+        val collectionSourceIds = setOf(
+            SourcePlatformIds.NETEASE,
+            SourcePlatformIds.KUWO,
+            SourcePlatformIds.KUGOU,
+            SourcePlatformIds.QQ,
+            SourcePlatformIds.MIGU
+        )
     }
 }

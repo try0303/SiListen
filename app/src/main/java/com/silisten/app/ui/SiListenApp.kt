@@ -571,6 +571,9 @@ fun SiListenApp(viewModel: SiListenViewModel) {
                                     commentsMessage = uiState.playlistCommentsMessage,
                                     isSubscribed = viewModel.isSelectedPlaylistSubscribed(),
                                     isSubscriptionLoading = uiState.isPlaylistSubscriptionLoading,
+                                    canShowComments = viewModel.canSelectedPlaylistShowComments(),
+                                    canShowSubscriptionAction = viewModel.canSelectedPlaylistShowSubscriptionAction(),
+                                    isSubscriptionLocked = viewModel.isSelectedPlaylistSubscriptionLocked(),
                                     dark = resolvedDark,
                                     glassy = appearance.blurEnabled,
                                     onBack = {

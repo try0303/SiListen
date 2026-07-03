@@ -46,6 +46,7 @@ import com.silisten.app.playback.LyricOverlayService
 import com.silisten.app.playback.PlaybackNotificationBridge
 import com.silisten.app.playback.PlaybackStreamResolver
 import com.silisten.app.playback.PlaybackMode
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
@@ -187,13 +188,6 @@ data class LikePromptState(
     val showAddToPlaylistAction: Boolean = true
 )
 
-private data class SearchInitialResults(
-    val songs: List<Song>,
-    val playlists: List<MusicPlaylist>,
-    val albums: List<MusicPlaylist>,
-    val artists: List<MusicPlaylist>
-)
-
 data class AccountUiState(
     val phone: String = "",
     val captcha: String = "",
@@ -262,6 +256,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
 
     private var qrLoginJob: Job? = null
     private var searchJob: Job? = null
+    private var searchGeneration = 0L
     private var smsCooldownJob: Job? = null
     private var lyricJob: Job? = null
     private var libraryJob: Job? = null
@@ -470,6 +465,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
 
     fun selectSource(sourceId: String) {
         searchJob?.cancel()
+        nextSearchGeneration()
         uiState = uiState.copy(
             selectedSourceId = sourceId,
             searchQuery = "",
@@ -734,11 +730,8 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun openPlaylist(playlist: MusicPlaylist) {
-        val isArtist = playlist.kind == PlaylistKind.Artist || playlist.id.startsWith("netease-artist-")
-        val needsDetail = playlist.songs.isEmpty() &&
-            (playlist.id.startsWith("netease-playlist-") ||
-                playlist.id.startsWith("netease-album-") ||
-                playlist.id.startsWith("netease-artist-"))
+        val isArtist = playlist.kind == PlaylistKind.Artist || playlist.id.contains("-artist-")
+        val needsDetail = playlist.needsRemoteCollectionDetail()
         val nextBackStack = uiState.selectedPlaylist
             ?.takeIf { it.id != playlist.id }
             ?.let { uiState.playlistBackStack + it }
@@ -773,7 +766,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
             return
         }
         viewModelScope.launch {
-            val detail = runCatching { musicRepository.neteasePlaylistDetail(playlist) }.getOrElse {
+            val detail = runCatching { musicRepository.playlistDetail(playlist) }.getOrElse {
                 uiState = uiState.copy(
                     isPlaylistDetailLoading = false,
                     playlistDetailMessage = "内容详情加载失败：${it.message.orEmpty()}"
@@ -786,6 +779,9 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
                 recommendedPlaylists = uiState.recommendedPlaylists.replacePlaylist(detail),
                 userPlaylists = uiState.userPlaylists.replacePlaylist(detail),
                 featured = uiState.featured.replacePlaylist(detail),
+                searchPlaylists = uiState.searchPlaylists.replacePlaylist(detail),
+                searchAlbums = uiState.searchAlbums.replacePlaylist(detail),
+                searchArtists = uiState.searchArtists.replacePlaylist(detail),
                 isPlaylistDetailLoading = false,
                 playlistDetailMessage = if (detail.songs.isEmpty()) "这里暂时没有可播放歌曲" else null
             )
@@ -886,7 +882,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
                 )
             )
             val nextSongs = runCatching {
-                musicRepository.neteaseArtistSongs(artist, ARTIST_SONG_PAGE_SIZE, offset)
+                musicRepository.artistSongs(artist, ARTIST_SONG_PAGE_SIZE, offset)
             }.getOrElse {
                 if (uiState.selectedPlaylist?.id == requestArtistId) {
                     uiState = uiState.copy(
@@ -920,6 +916,15 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         return isPlaylistSubscribed(playlist)
     }
 
+    fun canSelectedPlaylistShowComments(): Boolean =
+        uiState.selectedPlaylist?.supportsPlaylistComments() == true
+
+    fun canSelectedPlaylistShowSubscriptionAction(): Boolean =
+        uiState.selectedPlaylist?.supportsSubscriptionAction() == true
+
+    fun isSelectedPlaylistSubscriptionLocked(): Boolean =
+        uiState.selectedPlaylist?.isOwnedByCurrentUser() == true
+
     fun showPlaylistOverview() {
         if (uiState.selectedPlaylist == null) return
         uiState = uiState.copy(selectedPlaylistRoute = PlaylistRoute.Overview)
@@ -927,6 +932,16 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
 
     fun showPlaylistComments() {
         val playlist = uiState.selectedPlaylist ?: return
+        if (!playlist.supportsPlaylistComments()) {
+            uiState = uiState.copy(
+                selectedPlaylistRoute = PlaylistRoute.Overview,
+                playlistComments = emptyList(),
+                playlistCommentCount = 0,
+                playlistCommentsMessage = null,
+                message = "这个内容暂不支持查看评论"
+            )
+            return
+        }
         uiState = uiState.copy(selectedPlaylistRoute = PlaylistRoute.Comments)
         if (uiState.playlistComments.isEmpty() && !uiState.isPlaylistCommentsLoading) {
             loadPlaylistComments(playlist, force = true)
@@ -991,11 +1006,19 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
 
     fun toggleSelectedPlaylistSubscription() {
         val playlist = uiState.selectedPlaylist ?: return
-        if (!accountState.loginState.loggedIn) {
-            uiState = uiState.copy(message = "请先登录网易云账号后再收藏歌单")
+        if (uiState.isPlaylistSubscriptionLoading || !playlist.supportsSubscriptionAction()) return
+        if (playlist.isOwnedByCurrentUser()) {
+            uiState = uiState.copy(message = "自己创建的歌单已在账号中，无需取消收藏")
             return
         }
-        if (uiState.isPlaylistSubscriptionLoading || playlist.kind == PlaylistKind.LikedSongs) return
+        if (!accountState.loginState.loggedIn || !playlist.canSubscribeWithNetease()) {
+            if (isPlaylistSubscribed(playlist)) {
+                removeSavedCollectionFromLocalLibrary(playlist)
+            } else {
+                savePlaylistToLocalLibrary(playlist)
+            }
+            return
+        }
         val subscribe = !isPlaylistSubscribed(playlist)
         viewModelScope.launch {
             uiState = uiState.copy(isPlaylistSubscriptionLoading = true)
@@ -1018,12 +1041,45 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
                 message = result.message
             )
             if (result.success) {
+                musicRepository.clearNeteaseLibraryCache()
                 refreshLibrary(force = true)
             }
         }
     }
 
-    fun refreshLibrary(force: Boolean = true) {
+    private fun savePlaylistToLocalLibrary(playlist: MusicPlaylist) {
+        val recordId = playlist.localSavedCollectionId()
+        if (localPlaylistRecords.any { it.id == recordId }) {
+            uiState = uiState.copy(message = "已收藏到本地歌单库")
+            return
+        }
+        saveLocalPlaylistRecords(
+            records = localPlaylistRecords + LocalPlaylistRecord(
+                id = recordId,
+                title = playlist.title.ifBlank { "本地收藏" },
+                songs = playlist.songs
+            ),
+            message = "已收藏到本地歌单库"
+        )
+    }
+
+    private fun removeSavedCollectionFromLocalLibrary(playlist: MusicPlaylist) {
+        val recordId = playlist.localSavedCollectionId()
+        if (localPlaylistRecords.none { it.id == recordId }) {
+            uiState = uiState.copy(message = "这个歌单没有保存在本地歌单库")
+            return
+        }
+        saveLocalPlaylistRecords(
+            records = localPlaylistRecords.filterNot { it.id == recordId },
+            message = "已从本地歌单库移除"
+        )
+    }
+
+    fun syncAccountContent() {
+        refreshLibrary(force = true, userTriggered = true)
+    }
+
+    fun refreshLibrary(force: Boolean = true, userTriggered: Boolean = false) {
         if (!accountState.loginState.loggedIn) {
             uiState = uiState.copy(
                 dailyDiscovery = null,
@@ -1035,14 +1091,21 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
                 songLikeLoadingIds = emptySet(),
                 userPlaylists = emptyList(),
                 subscribedPlaylistIds = emptySet(),
-                isLibraryLoading = false
+                isLibraryLoading = false,
+                message = if (userTriggered) "请先登录账号后再同步内容" else uiState.message
             )
             return
         }
         if (!force && !shouldRefreshLibrary()) return
+        if (userTriggered) {
+            musicRepository.clearNeteaseLibraryCache()
+        }
         libraryJob?.cancel()
         libraryJob = viewModelScope.launch {
-            uiState = uiState.copy(isLibraryLoading = true, message = null)
+            uiState = uiState.copy(
+                isLibraryLoading = true,
+                message = if (userTriggered) "正在同步内容..." else null
+            )
             val userId = accountState.loginState.user?.userId ?: 0L
             val dailyDeferred = async { runCatching { musicRepository.neteaseDailyDiscovery() }.getOrNull() }
             val fmDeferred = async { runCatching { musicRepository.neteasePersonalFm() }.getOrNull() }
@@ -1078,7 +1141,8 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
                 likedSongIds = likedSongIdsDeferred.await(),
                 userPlaylists = userPlaylists,
                 subscribedPlaylistIds = userPlaylists.mapTo(linkedSetOf()) { it.id },
-                isLibraryLoading = false
+                isLibraryLoading = false,
+                message = if (userTriggered) "内容已同步" else uiState.message
             )
             lastLibraryRefreshAt = SystemClock.elapsedRealtime()
         }
@@ -1092,6 +1156,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
     fun updateSearchQuery(query: String) {
         uiState = uiState.copy(searchQuery = query)
         searchJob?.cancel()
+        val generation = nextSearchGeneration()
         val cleanQuery = query.trim()
         if (cleanQuery.isBlank()) {
             uiState = uiState.copy(
@@ -1110,8 +1175,8 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
             return
         }
         searchJob = viewModelScope.launch {
-            delay(80)
-            performSearch(cleanQuery)
+            delay(SEARCH_DEBOUNCE_MS)
+            performSearch(cleanQuery, generation)
         }
     }
 
@@ -1306,12 +1371,13 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
     fun runSearch() {
         val query = uiState.searchQuery.trim()
         searchJob?.cancel()
+        val generation = nextSearchGeneration()
         searchJob = viewModelScope.launch {
-            performSearch(query)
+            performSearch(query, generation)
         }
     }
 
-    private suspend fun performSearch(query: String) {
+    private suspend fun performSearch(query: String, generation: Long) {
         if (query.isBlank()) {
             uiState = uiState.copy(
                 searchResults = emptyList(),
@@ -1344,72 +1410,277 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         val selectedSourceId = uiState.selectedSourceId
         val sourceSettings = uiState.sourceSettings
         val sourceId = effectiveSearchSourceId(selectedSourceId, sourceSettings)
-        val canSearchNeteaseCollections = sourceSettings.enabledSearchPlatformIds
-            .map(::normalizeBuiltInPlatformId)
-            .contains(SourcePlatformIds.NETEASE) &&
-            (sourceId == SourcePlatformIds.ALL || sourceId == SourcePlatformIds.NETEASE)
-        val results = coroutineScope {
-            val songs = async {
-                runCatching {
-                    musicRepository.searchSongs(sourceId, query, SEARCH_SONG_PAGE_SIZE, 0, sourceSettings)
-                }.getOrDefault(emptyList())
-            }
-            val playlists = async {
-                if (canSearchNeteaseCollections) {
-                    runCatching {
-                        musicRepository.searchPlaylists(SourcePlatformIds.NETEASE, query, SEARCH_COLLECTION_PAGE_SIZE, 0)
-                    }.getOrDefault(emptyList())
-                } else {
-                    emptyList()
-                }
-            }
-            val albums = async {
-                if (canSearchNeteaseCollections) {
-                    runCatching {
-                        musicRepository.searchAlbums(SourcePlatformIds.NETEASE, query, SEARCH_COLLECTION_PAGE_SIZE, 0)
-                    }.getOrDefault(emptyList())
-                } else {
-                    emptyList()
-                }
-            }
-            val artists = async {
-                if (canSearchNeteaseCollections) {
-                    runCatching {
-                        musicRepository.searchArtists(SourcePlatformIds.NETEASE, query, SEARCH_COLLECTION_PAGE_SIZE, 0)
-                    }.getOrDefault(emptyList())
-                } else {
-                    emptyList()
-                }
-            }
-            SearchInitialResults(
-                songs = songs.await(),
-                playlists = playlists.await(),
-                albums = albums.await(),
-                artists = artists.await()
+        if (sourceId == SourcePlatformIds.ALL) {
+            launchSearchCollections(
+                query = query,
+                selectedSourceId = selectedSourceId,
+                sourceId = sourceId,
+                sourceSettings = sourceSettings,
+                generation = generation,
+                startDelayMs = SEARCH_COLLECTION_START_DELAY_MS
+            )
+            performProgressiveAllSourceSongSearch(
+                query = query,
+                selectedSourceId = selectedSourceId,
+                sourceSettings = sourceSettings,
+                generation = generation
+            )
+            return
+        }
+        val songs = runCatching {
+            musicRepository.searchSongs(sourceId, query, SEARCH_SONG_PAGE_SIZE, 0, sourceSettings)
+        }.getOrDefault(emptyList())
+        if (isCurrentSearchRequest(selectedSourceId, query, generation)) {
+            uiState = uiState.copy(
+                searchResults = songs,
+                searchHasMoreSongs = songs.size >= SEARCH_SONG_PAGE_SIZE,
+                isSearching = false,
+                message = if (songs.isEmpty()) "正在继续搜索歌单、专辑和歌手..." else null
             )
         }
-        if (selectedSourceId == uiState.selectedSourceId && query == uiState.searchQuery.trim()) {
-            uiState = uiState.copy(
-                searchResults = results.songs,
-                searchPlaylists = results.playlists,
-                searchAlbums = results.albums,
-                searchArtists = results.artists,
-                searchHasMoreSongs = results.songs.size >= SEARCH_SONG_PAGE_SIZE,
-                searchHasMorePlaylists = results.playlists.size >= SEARCH_COLLECTION_PAGE_SIZE,
-                searchHasMoreAlbums = results.albums.size >= SEARCH_COLLECTION_PAGE_SIZE,
-                searchHasMoreArtists = results.artists.size >= SEARCH_COLLECTION_PAGE_SIZE,
-                isSearching = false,
-                message = if (
-                    results.songs.isEmpty() &&
-                    results.playlists.isEmpty() &&
-                    results.albums.isEmpty() &&
-                    results.artists.isEmpty()
-                ) {
-                    "没有找到相关内容"
-                } else {
-                    null
+        launchSearchCollections(query, selectedSourceId, sourceId, sourceSettings, generation)
+    }
+
+    private suspend fun performProgressiveAllSourceSongSearch(
+        query: String,
+        selectedSourceId: String,
+        sourceSettings: SourceSettingsState,
+        generation: Long
+    ) {
+        val sourceIds = progressiveSearchSourceIds(sourceSettings)
+        if (sourceIds.isEmpty()) {
+            if (isCurrentSearchRequest(selectedSourceId, query, generation)) {
+                uiState = uiState.copy(
+                    isSearching = false,
+                    message = "请先在音源设置里开启至少一个搜索平台"
+                )
+            }
+            return
+        }
+        coroutineScope {
+            sourceIds.forEach { platformId ->
+                launch {
+                    val songs = try {
+                        musicRepository.searchSongs(platformId, query, ALL_SOURCE_SONG_PAGE_PER_PLATFORM, 0, sourceSettings)
+                    } catch (cancellation: CancellationException) {
+                        throw cancellation
+                    } catch (_: Throwable) {
+                        emptyList()
+                    }
+                    if (!isCurrentSearchRequest(selectedSourceId, query, generation)) return@launch
+                    val combined = (uiState.searchResults + songs)
+                        .distinctBy { "${it.sourceId}:${it.id}" }
+                    uiState = uiState.copy(
+                        searchResults = combined,
+                        searchHasMoreSongs = uiState.searchHasMoreSongs || songs.size >= ALL_SOURCE_SONG_PAGE_PER_PLATFORM,
+                        isSearching = if (combined.isNotEmpty()) false else uiState.isSearching,
+                        message = if (combined.isNotEmpty()) null else uiState.message
+                    )
                 }
+            }
+        }
+        if (isCurrentSearchRequest(selectedSourceId, query, generation)) {
+            val hasAnyResult = uiState.searchResults.isNotEmpty() ||
+                uiState.searchPlaylists.isNotEmpty() ||
+                uiState.searchAlbums.isNotEmpty() ||
+                uiState.searchArtists.isNotEmpty()
+            uiState = uiState.copy(
+                isSearching = false,
+                message = if (hasAnyResult) null else "没有找到相关内容"
             )
+        }
+    }
+
+    private fun launchSearchCollections(
+        query: String,
+        selectedSourceId: String,
+        sourceId: String,
+        sourceSettings: SourceSettingsState,
+        generation: Long,
+        startDelayMs: Long = 0L
+    ) {
+        viewModelScope.launch {
+            if (startDelayMs > 0L) delay(startDelayMs)
+            if (!isCurrentSearchRequest(selectedSourceId, query, generation)) return@launch
+            val playlists = runCatching {
+                musicRepository.searchPlaylists(sourceId, query, SEARCH_COLLECTION_PAGE_SIZE, 0, sourceSettings)
+            }.getOrDefault(emptyList())
+            if (isCurrentSearchRequest(selectedSourceId, query, generation)) {
+                uiState = uiState.copy(
+                    searchPlaylists = playlists,
+                    searchHasMorePlaylists = collectionHasMore(sourceId, playlists),
+                    message = searchEmptyMessage(playlists = playlists)
+                )
+            }
+        }
+        viewModelScope.launch {
+            if (startDelayMs > 0L) delay(startDelayMs + 80L)
+            if (!isCurrentSearchRequest(selectedSourceId, query, generation)) return@launch
+            val albums = runCatching {
+                musicRepository.searchAlbums(sourceId, query, SEARCH_COLLECTION_PAGE_SIZE, 0, sourceSettings)
+            }.getOrDefault(emptyList())
+            if (isCurrentSearchRequest(selectedSourceId, query, generation)) {
+                uiState = uiState.copy(
+                    searchAlbums = albums,
+                    searchHasMoreAlbums = collectionHasMore(sourceId, albums),
+                    message = searchEmptyMessage(albums = albums)
+                )
+            }
+        }
+        viewModelScope.launch {
+            if (startDelayMs > 0L) delay(startDelayMs + 160L)
+            if (!isCurrentSearchRequest(selectedSourceId, query, generation)) return@launch
+            val artists = runCatching {
+                musicRepository.searchArtists(sourceId, query, SEARCH_COLLECTION_PAGE_SIZE, 0, sourceSettings)
+            }.getOrDefault(emptyList())
+            if (isCurrentSearchRequest(selectedSourceId, query, generation)) {
+                uiState = uiState.copy(
+                    searchArtists = artists,
+                    searchHasMoreArtists = collectionHasMore(sourceId, artists),
+                    message = searchEmptyMessage(artists = artists)
+                )
+            }
+        }
+    }
+
+    private fun searchEmptyMessage(
+        songs: List<Song> = uiState.searchResults,
+        playlists: List<MusicPlaylist> = uiState.searchPlaylists,
+        albums: List<MusicPlaylist> = uiState.searchAlbums,
+        artists: List<MusicPlaylist> = uiState.searchArtists
+    ): String? =
+        if (
+            !uiState.isSearching &&
+            songs.isEmpty() &&
+            playlists.isEmpty() &&
+            albums.isEmpty() &&
+            artists.isEmpty()
+        ) {
+            "没有找到相关内容"
+        } else {
+            null
+        }
+
+    private fun loadMoreProgressiveAllSourceSongs(
+        query: String,
+        selectedSourceId: String,
+        sourceSettings: SourceSettingsState,
+        generation: Long
+    ) {
+        viewModelScope.launch {
+            val sourceIds = progressiveSearchSourceIds(sourceSettings)
+            if (sourceIds.isEmpty()) {
+                uiState = uiState.copy(isLoadingMoreSearch = false)
+                return@launch
+            }
+            val offsets = sourceIds.associateWith { platformId ->
+                uiState.searchResults.count { normalizeBuiltInPlatformId(it.sourceId) == platformId }
+            }
+            uiState = uiState.copy(isLoadingMoreSearch = true, message = null)
+            var hasMoreFromAnySource = false
+            coroutineScope {
+                sourceIds.forEach { platformId ->
+                    launch {
+                        val nextSongs = try {
+                            musicRepository.searchSongs(
+                                sourceId = platformId,
+                                query = query,
+                                limit = ALL_SOURCE_SONG_PAGE_PER_PLATFORM,
+                                offset = offsets[platformId] ?: 0,
+                                sourceSettings = sourceSettings
+                            )
+                        } catch (cancellation: CancellationException) {
+                            throw cancellation
+                        } catch (_: Throwable) {
+                            emptyList()
+                        }
+                        if (!isCurrentSearchRequest(selectedSourceId, query, generation)) return@launch
+                        hasMoreFromAnySource = hasMoreFromAnySource || nextSongs.size >= ALL_SOURCE_SONG_PAGE_PER_PLATFORM
+                        val combined = (uiState.searchResults + nextSongs)
+                            .distinctBy { "${it.sourceId}:${it.id}" }
+                        uiState = uiState.copy(searchResults = combined)
+                    }
+                }
+            }
+            if (!isCurrentSearchRequest(selectedSourceId, query, generation)) {
+                uiState = uiState.copy(isLoadingMoreSearch = false)
+                return@launch
+            }
+            uiState = uiState.copy(
+                searchHasMoreSongs = hasMoreFromAnySource,
+                isLoadingMoreSearch = false
+            )
+        }
+    }
+
+    private fun loadMoreProgressiveAllSourceCollections(
+        kind: SearchResultKind,
+        query: String,
+        selectedSourceId: String,
+        sourceSettings: SourceSettingsState,
+        generation: Long
+    ) {
+        viewModelScope.launch {
+            val sourceIds = progressiveSearchSourceIds(sourceSettings)
+            if (sourceIds.isEmpty()) {
+                uiState = uiState.copy(isLoadingMoreSearch = false)
+                return@launch
+            }
+            val currentItems = currentSearchCollections(kind)
+            val offsets = sourceIds.associateWith { platformId ->
+                currentItems.count { it.searchSourceId() == platformId }
+            }
+            uiState = uiState.copy(isLoadingMoreSearch = true, message = null)
+            var hasMoreFromAnySource = false
+            coroutineScope {
+                sourceIds.forEach { platformId ->
+                    launch {
+                        val nextItems = try {
+                            searchCollectionPage(
+                                kind = kind,
+                                sourceId = platformId,
+                                query = query,
+                                limit = ALL_SOURCE_COLLECTION_PAGE_PER_PLATFORM,
+                                offset = offsets[platformId] ?: 0,
+                                sourceSettings = sourceSettings
+                            )
+                        } catch (cancellation: CancellationException) {
+                            throw cancellation
+                        } catch (_: Throwable) {
+                            emptyList()
+                        }
+                        if (!isCurrentSearchRequest(selectedSourceId, query, generation)) return@launch
+                        hasMoreFromAnySource = hasMoreFromAnySource ||
+                            nextItems.size >= ALL_SOURCE_COLLECTION_PAGE_PER_PLATFORM
+                        val combined = (currentSearchCollections(kind) + nextItems).distinctBy { it.id }
+                        uiState = when (kind) {
+                            SearchResultKind.Playlists -> uiState.copy(searchPlaylists = combined)
+                            SearchResultKind.Albums -> uiState.copy(searchAlbums = combined)
+                            SearchResultKind.Artists -> uiState.copy(searchArtists = combined)
+                            SearchResultKind.Songs -> uiState
+                        }
+                    }
+                }
+            }
+            if (!isCurrentSearchRequest(selectedSourceId, query, generation)) {
+                uiState = uiState.copy(isLoadingMoreSearch = false)
+                return@launch
+            }
+            uiState = when (kind) {
+                SearchResultKind.Playlists -> uiState.copy(
+                    searchHasMorePlaylists = hasMoreFromAnySource,
+                    isLoadingMoreSearch = false
+                )
+                SearchResultKind.Albums -> uiState.copy(
+                    searchHasMoreAlbums = hasMoreFromAnySource,
+                    isLoadingMoreSearch = false
+                )
+                SearchResultKind.Artists -> uiState.copy(
+                    searchHasMoreArtists = hasMoreFromAnySource,
+                    isLoadingMoreSearch = false
+                )
+                SearchResultKind.Songs -> uiState.copy(isLoadingMoreSearch = false)
+            }
         }
     }
 
@@ -1426,10 +1697,15 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         val selectedSourceId = uiState.selectedSourceId
         val sourceSettings = uiState.sourceSettings
         val sourceId = effectiveSearchSourceId(selectedSourceId, sourceSettings)
-        val canSearchNeteaseCollections = sourceSettings.enabledSearchPlatformIds
-            .map(::normalizeBuiltInPlatformId)
-            .contains(SourcePlatformIds.NETEASE) &&
-            (sourceId == SourcePlatformIds.ALL || sourceId == SourcePlatformIds.NETEASE)
+        val generation = searchGeneration
+        if (kind == SearchResultKind.Songs && sourceId == SourcePlatformIds.ALL) {
+            loadMoreProgressiveAllSourceSongs(query, selectedSourceId, sourceSettings, generation)
+            return
+        }
+        if (kind != SearchResultKind.Songs && sourceId == SourcePlatformIds.ALL) {
+            loadMoreProgressiveAllSourceCollections(kind, query, selectedSourceId, sourceSettings, generation)
+            return
+        }
         val offset = when (kind) {
             SearchResultKind.Songs -> uiState.searchResults.size
             SearchResultKind.Playlists -> uiState.searchPlaylists.size
@@ -1449,36 +1725,24 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
                 }
                 SearchResultKind.Playlists -> {
                     nextSongs = emptyList()
-                    nextPlaylists = if (canSearchNeteaseCollections) {
-                        runCatching {
-                            musicRepository.searchPlaylists(SourcePlatformIds.NETEASE, query, SEARCH_COLLECTION_PAGE_SIZE, offset)
-                        }.getOrDefault(emptyList())
-                    } else {
-                        emptyList()
-                    }
+                    nextPlaylists = runCatching {
+                        musicRepository.searchPlaylists(sourceId, query, SEARCH_COLLECTION_PAGE_SIZE, offset, sourceSettings)
+                    }.getOrDefault(emptyList())
                 }
                 SearchResultKind.Albums -> {
                     nextSongs = emptyList()
-                    nextPlaylists = if (canSearchNeteaseCollections) {
-                        runCatching {
-                            musicRepository.searchAlbums(SourcePlatformIds.NETEASE, query, SEARCH_COLLECTION_PAGE_SIZE, offset)
-                        }.getOrDefault(emptyList())
-                    } else {
-                        emptyList()
-                    }
+                    nextPlaylists = runCatching {
+                        musicRepository.searchAlbums(sourceId, query, SEARCH_COLLECTION_PAGE_SIZE, offset, sourceSettings)
+                    }.getOrDefault(emptyList())
                 }
                 SearchResultKind.Artists -> {
                     nextSongs = emptyList()
-                    nextPlaylists = if (canSearchNeteaseCollections) {
-                        runCatching {
-                            musicRepository.searchArtists(SourcePlatformIds.NETEASE, query, SEARCH_COLLECTION_PAGE_SIZE, offset)
-                        }.getOrDefault(emptyList())
-                    } else {
-                        emptyList()
-                    }
+                    nextPlaylists = runCatching {
+                        musicRepository.searchArtists(sourceId, query, SEARCH_COLLECTION_PAGE_SIZE, offset, sourceSettings)
+                    }.getOrDefault(emptyList())
                 }
             }
-            if (selectedSourceId != uiState.selectedSourceId || query != uiState.searchQuery.trim()) {
+            if (!isCurrentSearchRequest(selectedSourceId, query, generation)) {
                 uiState = uiState.copy(isLoadingMoreSearch = false)
                 return@launch
             }
@@ -1520,6 +1784,16 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
     }
 
     private fun loadPlaylistComments(playlist: MusicPlaylist, force: Boolean) {
+        if (!playlist.supportsPlaylistComments()) {
+            uiState = uiState.copy(
+                selectedPlaylistRoute = PlaylistRoute.Overview,
+                playlistComments = emptyList(),
+                playlistCommentCount = 0,
+                isPlaylistCommentsLoading = false,
+                playlistCommentsMessage = null
+            )
+            return
+        }
         if (!force && uiState.playlistComments.isNotEmpty()) return
         viewModelScope.launch {
             val sort = uiState.playlistCommentSort
@@ -1912,11 +2186,22 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
     }
 
     private companion object {
-        const val SEARCH_SONG_PAGE_SIZE = 30
-        const val SEARCH_COLLECTION_PAGE_SIZE = 20
+        const val SEARCH_DEBOUNCE_MS = 220L
+        const val SEARCH_COLLECTION_START_DELAY_MS = 180L
+        const val SEARCH_SONG_PAGE_SIZE = 15
+        const val SEARCH_COLLECTION_PAGE_SIZE = 15
+        const val ALL_SOURCE_SONG_PAGE_PER_PLATFORM = 3
+        const val ALL_SOURCE_COLLECTION_PAGE_PER_PLATFORM = 3
         const val ARTIST_SONG_PAGE_SIZE = 50
         const val PLAYER_COMMENT_PAGE_SIZE = 30
         const val LYRIC_LOAD_RETRY_COUNT = 2
+        val remoteCollectionSourceIds = setOf(
+            SourcePlatformIds.NETEASE,
+            SourcePlatformIds.KUWO,
+            SourcePlatformIds.KUGOU,
+            SourcePlatformIds.QQ,
+            SourcePlatformIds.MIGU
+        )
 
         val themePreferenceKeys = setOf(
             "mode",
@@ -1951,23 +2236,90 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
                 selectedSourceId
         }
 
+    private fun nextSearchGeneration(): Long {
+        searchGeneration += 1
+        return searchGeneration
+    }
+
+    private fun isCurrentSearchRequest(
+        selectedSourceId: String,
+        query: String,
+        generation: Long
+    ): Boolean =
+        generation == searchGeneration &&
+            selectedSourceId == uiState.selectedSourceId &&
+            query == uiState.searchQuery.trim()
+
+    private fun progressiveSearchSourceIds(sourceSettings: SourceSettingsState): List<String> {
+        val enabled = sourceSettings.enabledSearchPlatformIds
+            .map(::normalizeBuiltInPlatformId)
+            .toSet()
+        return listOf(
+            SourcePlatformIds.NETEASE,
+            SourcePlatformIds.KUGOU,
+            SourcePlatformIds.QQ,
+            SourcePlatformIds.KUWO,
+            SourcePlatformIds.MIGU
+        ).filter { it in enabled }
+    }
+
+    private fun collectionHasMore(sourceId: String, items: List<MusicPlaylist>): Boolean =
+        if (sourceId == SourcePlatformIds.ALL) {
+            items.isNotEmpty()
+        } else {
+            items.size >= SEARCH_COLLECTION_PAGE_SIZE
+        }
+
+    private fun currentSearchCollections(kind: SearchResultKind): List<MusicPlaylist> =
+        when (kind) {
+            SearchResultKind.Playlists -> uiState.searchPlaylists
+            SearchResultKind.Albums -> uiState.searchAlbums
+            SearchResultKind.Artists -> uiState.searchArtists
+            SearchResultKind.Songs -> emptyList()
+        }
+
+    private suspend fun searchCollectionPage(
+        kind: SearchResultKind,
+        sourceId: String,
+        query: String,
+        limit: Int,
+        offset: Int,
+        sourceSettings: SourceSettingsState
+    ): List<MusicPlaylist> =
+        when (kind) {
+            SearchResultKind.Playlists ->
+                musicRepository.searchPlaylists(sourceId, query, limit, offset, sourceSettings)
+            SearchResultKind.Albums ->
+                musicRepository.searchAlbums(sourceId, query, limit, offset, sourceSettings)
+            SearchResultKind.Artists ->
+                musicRepository.searchArtists(sourceId, query, limit, offset, sourceSettings)
+            SearchResultKind.Songs ->
+                emptyList()
+        }
+
+    private fun MusicPlaylist.searchSourceId(): String =
+        normalizeBuiltInPlatformId(id.substringBefore('-', missingDelimiterValue = sourceIdFallback()))
+
+    private fun MusicPlaylist.sourceIdFallback(): String =
+        songs.firstOrNull()?.sourceId ?: SourcePlatformIds.NETEASE
+
     private fun rerunSearchIfNeeded() {
         val query = uiState.searchQuery.trim()
         if (query.isBlank()) return
         searchJob?.cancel()
+        val generation = nextSearchGeneration()
         searchJob = viewModelScope.launch {
-            performSearch(query)
+            performSearch(query, generation)
         }
     }
 
+    private fun MusicPlaylist.needsRemoteCollectionDetail(): Boolean =
+        songs.isEmpty() && id.substringBefore('-', missingDelimiterValue = "") in remoteCollectionSourceIds
+
     fun playPlaylist(playlist: MusicPlaylist, startIndex: Int = 0) {
         viewModelScope.launch {
-            val needsDetail = playlist.songs.isEmpty() &&
-                (playlist.id.startsWith("netease-playlist-") ||
-                    playlist.id.startsWith("netease-album-") ||
-                    playlist.id.startsWith("netease-artist-"))
-            val playable = if (needsDetail) {
-                runCatching { musicRepository.neteasePlaylistDetail(playlist) }.getOrDefault(playlist)
+            val playable = if (playlist.needsRemoteCollectionDetail()) {
+                runCatching { musicRepository.playlistDetail(playlist) }.getOrDefault(playlist)
             } else {
                 playlist
             }
@@ -2213,6 +2565,18 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         )
     }
 
+    fun deleteLocalPlaylist(playlist: MusicPlaylist) {
+        if (playlist.kind != PlaylistKind.LocalPlaylist) return
+        val record = localPlaylistRecords.firstOrNull { it.id == playlist.id } ?: run {
+            uiState = uiState.copy(message = "没有找到这个本地歌单")
+            return
+        }
+        saveLocalPlaylistRecords(
+            records = localPlaylistRecords.filterNot { it.id == record.id },
+            message = "已删除本地歌单「${record.title}」"
+        )
+    }
+
     private fun addSongToLocalPlaylist(song: Song, playlist: MusicPlaylist) {
         val record = localPlaylistRecords.firstOrNull { it.id == playlist.id } ?: run {
             uiState = uiState.copy(message = "没有找到这个本地歌单")
@@ -2240,14 +2604,19 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         val nextLocalPlaylists = localPlaylistRecords.toLocalPlaylists()
         val selected = uiState.selectedPlaylist?.let { current ->
             if (current.kind == PlaylistKind.LocalPlaylist) {
-                nextLocalPlaylists.firstOrNull { it.id == current.id } ?: current
+                nextLocalPlaylists.firstOrNull { it.id == current.id }
             } else {
                 current
             }
         }
+        val localIds = nextLocalPlaylists.mapTo(linkedSetOf()) { it.id }
         uiState = uiState.copy(
             localPlaylists = nextLocalPlaylists,
             selectedPlaylist = selected,
+            playlistBackStack = uiState.playlistBackStack.filterNot {
+                it.kind == PlaylistKind.LocalPlaylist && it.id !in localIds
+            },
+            selectedPlaylistRoute = if (selected == null) PlaylistRoute.Overview else uiState.selectedPlaylistRoute,
             message = message
         )
     }
@@ -2558,9 +2927,34 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
 
     private fun isPlaylistSubscribed(playlist: MusicPlaylist): Boolean {
         return playlist.kind == PlaylistKind.LikedSongs ||
-            playlist.kind == PlaylistKind.UserPlaylist ||
+            playlist.isOwnedByCurrentUser() ||
+            playlist.subscribed ||
+            localPlaylistRecords.any { it.id == playlist.localSavedCollectionId() } ||
             uiState.subscribedPlaylistIds.contains(playlist.id)
     }
+
+    private fun MusicPlaylist.supportsPlaylistComments(): Boolean =
+        id.startsWith("netease-playlist-") &&
+            (kind == PlaylistKind.Playlist || kind == PlaylistKind.UserPlaylist)
+
+    private fun MusicPlaylist.supportsSubscriptionAction(): Boolean =
+        !id.startsWith("local-") &&
+            (kind == PlaylistKind.Playlist || kind == PlaylistKind.UserPlaylist)
+
+    private fun MusicPlaylist.isOwnedByCurrentUser(): Boolean {
+        val userId = accountState.loginState.user?.userId ?: return false
+        return userId > 0L && kind == PlaylistKind.UserPlaylist && creatorUserId == userId
+    }
+
+    private fun MusicPlaylist.canSubscribeWithNetease(): Boolean =
+        id.startsWith("netease-playlist-") &&
+            kind != PlaylistKind.Album &&
+            kind != PlaylistKind.Artist &&
+            kind != PlaylistKind.LocalPlaylist &&
+            kind != PlaylistKind.LocalMusic
+
+    private fun MusicPlaylist.localSavedCollectionId(): String =
+        "local-saved-${kind.name.lowercase()}-${id.replace(Regex("[^A-Za-z0-9_.-]"), "_")}"
 
     private fun clearAccountLibrary() {
         lastLibraryRefreshAt = 0L

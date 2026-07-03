@@ -8,6 +8,7 @@ import com.silisten.app.data.model.PlaylistComment
 import com.silisten.app.data.model.PlaylistCommentBundle
 import com.silisten.app.data.model.PlaylistCommentReply
 import com.silisten.app.data.model.PlaylistCommentSort
+import com.silisten.app.data.model.PlaylistKind
 import com.silisten.app.data.model.SourcePlatformIds
 import com.silisten.app.data.model.Song
 import java.net.URLEncoder
@@ -15,6 +16,7 @@ import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.zip.InflaterInputStream
 import kotlinx.coroutines.Dispatchers
@@ -31,7 +33,7 @@ import org.json.JSONTokener
 class LxPlatformMusicSource(
     private val platform: LxPlatform,
     private val client: OkHttpClient = defaultClient
-) : MusicSource, PagedMusicSearchSource, SongCommentSource {
+) : MusicSource, PagedMusicSearchSource, CollectionSearchSource, CollectionDetailSource, SongCommentSource {
     override val info = MusicSourceInfo(
         id = platform.id,
         name = platform.label,
@@ -39,6 +41,10 @@ class LxPlatformMusicSource(
         badge = platform.lxId,
         accentHex = platform.accentHex
     )
+    private val songSearchCache = ConcurrentHashMap<String, CachedSongs>()
+    private val collectionSearchCache = ConcurrentHashMap<String, CachedCollections>()
+    private val playlistDetailCache = ConcurrentHashMap<String, CachedCollectionDetail>()
+    private val artistSongsCache = ConcurrentHashMap<String, CachedSongs>()
 
     override suspend fun featured(): List<MusicPlaylist> = emptyList()
 
@@ -50,7 +56,9 @@ class LxPlatformMusicSource(
             if (query.isBlank()) return@withContext emptyList()
             val safeLimit = limit.coerceIn(1, 50)
             val page = offset.coerceAtLeast(0) / safeLimit + 1
-            runCatching {
+            val cacheKey = "song:${query.cacheKey()}:$safeLimit:$page"
+            songSearchCache[cacheKey]?.takeIfFresh()?.let { return@withContext it }
+            val songs = runCatching {
                 when (platform.id) {
                     SourcePlatformIds.KUWO -> searchKuwo(query, page, safeLimit)
                     SourcePlatformIds.KUGOU -> searchKugou(query, page, safeLimit)
@@ -59,6 +67,41 @@ class LxPlatformMusicSource(
                     else -> emptyList()
                 }
             }.getOrDefault(emptyList())
+            songSearchCache[cacheKey] = CachedSongs(songs, cacheTtl(songs))
+            songs
+        }
+
+    override suspend fun searchPlaylists(keyword: String, limit: Int, offset: Int): List<MusicPlaylist> =
+        searchCollections("playlist", keyword, limit, offset) { query, page, safeLimit ->
+            when (platform.id) {
+                SourcePlatformIds.KUWO -> searchKuwoPlaylists(query, page, safeLimit)
+                SourcePlatformIds.KUGOU -> searchKugouPlaylists(query, page, safeLimit)
+                SourcePlatformIds.QQ -> searchQqPlaylists(query, page, safeLimit)
+                SourcePlatformIds.MIGU -> searchMiguPlaylists(query, page, safeLimit)
+                else -> emptyList()
+            }
+        }
+
+    override suspend fun searchAlbums(keyword: String, limit: Int, offset: Int): List<MusicPlaylist> =
+        searchCollections("album", keyword, limit, offset) { query, page, safeLimit ->
+            when (platform.id) {
+                SourcePlatformIds.KUWO -> searchKuwoAlbums(query, page, safeLimit)
+                SourcePlatformIds.KUGOU -> searchKugouAlbums(query, page, safeLimit)
+                SourcePlatformIds.QQ -> searchQqAlbums(query, page, safeLimit)
+                SourcePlatformIds.MIGU -> searchMiguAlbums(query, page, safeLimit)
+                else -> emptyList()
+            }
+        }
+
+    override suspend fun searchArtists(keyword: String, limit: Int, offset: Int): List<MusicPlaylist> =
+        searchCollections("artist", keyword, limit, offset) { query, page, safeLimit ->
+            when (platform.id) {
+                SourcePlatformIds.KUWO -> searchKuwoArtists(query, page, safeLimit)
+                SourcePlatformIds.KUGOU -> searchKugouArtists(query, page, safeLimit)
+                SourcePlatformIds.QQ -> searchQqArtists(query, page, safeLimit)
+                SourcePlatformIds.MIGU -> searchMiguArtists(query, page, safeLimit)
+                else -> emptyList()
+            }
         }
 
     override suspend fun streamUrl(song: Song): String = song.streamHint.orEmpty()
@@ -94,6 +137,48 @@ class LxPlatformMusicSource(
                 }
             }.getOrElse {
                 PlaylistCommentBundle(emptyList(), 0)
+            }
+        }
+
+    override suspend fun playlistDetail(playlist: MusicPlaylist): MusicPlaylist =
+        withContext(Dispatchers.IO) {
+            val cacheKey = "detail:${playlist.id}"
+            playlistDetailCache[cacheKey]?.takeIfFresh()?.let { return@withContext it }
+            val detail = runCatching {
+                when (platform.id) {
+                    SourcePlatformIds.KUWO -> kuwoCollectionDetail(playlist)
+                    SourcePlatformIds.KUGOU -> kugouCollectionDetail(playlist)
+                    SourcePlatformIds.QQ -> qqCollectionDetail(playlist)
+                    SourcePlatformIds.MIGU -> miguCollectionDetail(playlist)
+                    else -> null
+                }
+            }.getOrNull()
+            val loaded = detail?.takeIf { it.hasCollectionDetailPayload() } ?: playlist.withFallbackSongs()
+            loaded.copy(
+                subtitle = loaded.collectionSubtitleAfterDetail(),
+                coverUrl = loaded.bestCover()
+            ).also { result ->
+                playlistDetailCache[cacheKey] = CachedCollectionDetail(result, cacheTtl(result.songs + result.albums))
+            }
+        }
+
+    override suspend fun artistSongs(artist: MusicPlaylist, limit: Int, offset: Int): List<Song> =
+        withContext(Dispatchers.IO) {
+            val safeLimit = limit.coerceIn(1, 80)
+            val page = offset.coerceAtLeast(0) / safeLimit + 1
+            val cacheKey = "artist:${artist.id}:$safeLimit:$page"
+            artistSongsCache[cacheKey]?.takeIfFresh()?.let { return@withContext it }
+            val songs = runCatching {
+                when (platform.id) {
+                    SourcePlatformIds.KUGOU -> kugouArtistSongs(artist.rawCollectionId(), page, safeLimit)
+                    SourcePlatformIds.QQ -> qqArtistSongs(artist.rawCollectionId(), offset, safeLimit).first
+                    SourcePlatformIds.MIGU -> searchMigu("${artist.title} ${artist.subtitle}".trim(), page, safeLimit)
+                    SourcePlatformIds.KUWO -> searchKuwo(artist.title, page, safeLimit)
+                    else -> emptyList()
+                }
+            }.getOrDefault(emptyList())
+            songs.ifEmpty { fallbackSongsFor(artist, safeLimit, page) }.also { result ->
+                artistSongsCache[cacheKey] = CachedSongs(result, cacheTtl(result))
             }
         }
 
@@ -166,30 +251,7 @@ class LxPlatformMusicSource(
             headers = mapOf("Referer" to "https://y.qq.com/")
         ) ?: return emptyList()
         val songs = json.optJSONObject("data")?.optJSONObject("song")?.optJSONArray("list").orEmpty()
-        return songs.mapObjects { item ->
-            val songMid = item.optString("mid").ifBlank { item.optString("songmid") }.ifBlank { return@mapObjects null }
-            val songId = item.optLong("id", item.optLong("songid", 0L)).takeIf { it > 0L }?.toString().orEmpty()
-            val album = item.optJSONObject("album")
-            val albumMid = album?.optString("mid").orEmpty()
-            Song(
-                id = songMid,
-                title = item.optString("title").ifBlank { item.optString("songname") }.clean("未知歌曲"),
-                artist = item.optJSONArray("singer").names("name").clean("未知歌手"),
-                album = album?.optString("name").orEmpty().clean("未知专辑"),
-                coverUrl = if (albumMid.isNotBlank()) {
-                    "https://y.gtimg.cn/music/photo_new/T002R500x500M000$albumMid.jpg"
-                } else {
-                    defaultCover
-                },
-                durationMs = item.optLong("interval", 0L).secondsToMillis(),
-                sourceId = platform.id,
-                providerIds = platformIdentity(songMid) + mapOf(
-                    "tx_song_id" to songId,
-                    "tx_media_mid" to (item.optJSONObject("file")?.optString("media_mid").orEmpty()),
-                    "tx_album_mid" to albumMid
-                )
-            )
-        }
+        return songs.mapObjects { item -> item.toQqSong() }
     }
 
     private fun searchMigu(query: String, page: Int, limit: Int): List<Song> {
@@ -242,6 +304,805 @@ class LxPlatformMusicSource(
         }.distinctBy { it.providerIds["mg_copyright_id"] ?: it.id }
     }
 
+    private suspend fun searchCollections(
+        category: String,
+        keyword: String,
+        limit: Int,
+        offset: Int,
+        block: (String, Int, Int) -> List<MusicPlaylist>
+    ): List<MusicPlaylist> = withContext(Dispatchers.IO) {
+        val query = keyword.trim()
+        if (query.isBlank()) return@withContext emptyList()
+        val safeLimit = limit.coerceIn(1, 50)
+        val page = offset.coerceAtLeast(0) / safeLimit + 1
+        val cacheKey = "artwork-v3:$category:${query.cacheKey()}:$safeLimit:$page"
+        collectionSearchCache[cacheKey]?.takeIfFresh()?.let { return@withContext it }
+        val collections = runCatching { block(query, page, safeLimit) }.getOrDefault(emptyList())
+        collectionSearchCache[cacheKey] = CachedCollections(collections, cacheTtl(collections))
+        collections
+    }
+
+    private fun searchKuwoPlaylists(query: String, page: Int, limit: Int): List<MusicPlaylist> =
+        searchKuwoCollections(query, page, limit, ft = "playlist", kind = PlaylistKind.Playlist)
+
+    private fun searchKuwoAlbums(query: String, page: Int, limit: Int): List<MusicPlaylist> =
+        searchKuwoCollections(query, page, limit, ft = "album", kind = PlaylistKind.Album)
+
+    private fun searchKuwoArtists(query: String, page: Int, limit: Int): List<MusicPlaylist> =
+        searchKuwoCollections(query, page, limit, ft = "artist", kind = PlaylistKind.Artist)
+
+    private fun searchKuwoCollections(
+        query: String,
+        page: Int,
+        limit: Int,
+        ft: String,
+        kind: PlaylistKind
+    ): List<MusicPlaylist> {
+        val json = getJson(
+            "http://search.kuwo.cn/r.s?client=kt&all=${query.urlEncode()}" +
+                "&pn=${page - 1}&rn=$limit&uid=794762570&ver=kwplayer_ar_9.2.2.1" +
+                "&vipver=1&newver=1&ft=$ft&encoding=utf8&rformat=json&mobi=1"
+        ) ?: return emptyList()
+        return json.optJSONArray("abslist").orEmpty().mapObjects { item ->
+            val id = item.optString("id")
+                .ifBlank { item.optString("playlistid") }
+                .ifBlank { item.optString("albumid") }
+                .ifBlank { item.optString("artistid") }
+                .ifBlank { item.optString("ARTISTID") }
+                .ifBlank { return@mapObjects null }
+            val title = item.optString("name")
+                .ifBlank { item.optString("NAME") }
+                .ifBlank { item.optString("album") }
+                .ifBlank { item.optString("ALBUM") }
+                .ifBlank { item.optString("artist") }
+                .ifBlank { item.optString("ARTIST") }
+                .htmlEntityDecode()
+                .clean(defaultCollectionTitle(kind))
+            val subtitle = item.optString("info")
+                .ifBlank { item.optString("desc") }
+                .ifBlank { item.optString("artist") }
+                .ifBlank { item.optString("ARTIST") }
+                .htmlEntityDecode()
+                .clean(platform.label)
+            MusicPlaylist(
+                id = "${platform.id}-${kind.name.lowercase()}-$id",
+                title = title,
+                subtitle = subtitle,
+                coverUrl = item.kuwoCoverUrl(kind = kind, fallback = ""),
+                songs = emptyList(),
+                kind = kind,
+                albumCount = item.firstInt(listOf("albumNum", "ALBUMNUM", "album_count", "albumCount")),
+                songCount = item.firstInt(listOf("songnum", "SONGNUM", "musicNum", "MUSICNUM", "song_count", "songCount")),
+                mvCount = item.firstInt(listOf("mvNum", "MVNUM", "videoCount", "VideoCount"))
+            )
+        }
+    }
+
+    private fun searchKugouPlaylists(query: String, page: Int, limit: Int): List<MusicPlaylist> {
+        val json = getJson(
+            "https://songsearch.kugou.com/special_search?keyword=${query.urlEncode()}" +
+                "&page=$page&pagesize=$limit&platform=WebFilter"
+        ) ?: return emptyList()
+        return json.optJSONObject("data")?.optJSONArray("lists").orEmpty().mapObjects { item ->
+            val id = item.optString("specialid")
+                .ifBlank { item.optString("specialId") }
+                .ifBlank { item.optString("SpecialId") }
+                .ifBlank { return@mapObjects null }
+            MusicPlaylist(
+                id = "${platform.id}-playlist-$id",
+                title = item.optString("specialname")
+                    .ifBlank { item.optString("SpecialName") }
+                    .clean(defaultCollectionTitle(PlaylistKind.Playlist)),
+                subtitle = item.optString("intro").ifBlank { item.optString("Intro") }.clean(platform.label),
+                coverUrl = item.firstArtworkUrl(
+                    listOf("img", "Img", "imgurl", "ImgUrl", "Image", "image", "Avatar", "cover", "pic"),
+                    fallback = ""
+                ),
+                songs = emptyList(),
+                kind = PlaylistKind.Playlist,
+                songCount = item.firstInt(listOf("song_count", "songcount", "SongCount", "AudioCount", "audioCount"))
+            )
+        }
+    }
+
+    private fun searchKugouAlbums(query: String, page: Int, limit: Int): List<MusicPlaylist> {
+        val json = getJson(
+            "https://songsearch.kugou.com/album_search?keyword=${query.urlEncode()}" +
+                "&page=$page&pagesize=$limit&platform=WebFilter"
+        ) ?: return emptyList()
+        return json.optJSONObject("data")?.optJSONArray("lists").orEmpty().mapObjects { item ->
+            val id = item.optString("albumid")
+                .ifBlank { item.optString("albumId") }
+                .ifBlank { item.optString("AlbumID") }
+                .ifBlank { item.optString("AlbumId") }
+                .ifBlank { return@mapObjects null }
+            MusicPlaylist(
+                id = "${platform.id}-album-$id",
+                title = item.optString("albumname")
+                    .ifBlank { item.optString("AlbumName") }
+                    .clean(defaultCollectionTitle(PlaylistKind.Album)),
+                subtitle = item.optString("singer")
+                    .ifBlank { item.optString("singername") }
+                    .ifBlank { item.optString("SingerName") }
+                    .clean(platform.label),
+                coverUrl = item.firstArtworkUrl(
+                    listOf("img", "Img", "imgurl", "ImgUrl", "Image", "image", "Avatar", "cover", "pic"),
+                    fallback = ""
+                ),
+                songs = emptyList(),
+                kind = PlaylistKind.Album,
+                songCount = item.firstInt(listOf("song_count", "songcount", "SongCount", "AudioCount", "audioCount"))
+            )
+        }
+    }
+
+    private fun searchKugouArtists(query: String, page: Int, limit: Int): List<MusicPlaylist> {
+        val json = getJson(
+            "https://songsearch.kugou.com/author_search?keyword=${query.urlEncode()}" +
+                "&page=$page&pagesize=$limit&platform=WebFilter"
+        ) ?: return emptyList()
+        return json.optJSONObject("data")?.optJSONArray("lists").orEmpty().mapObjects { item ->
+            val id = item.optString("singerid")
+                .ifBlank { item.optString("singerId") }
+                .ifBlank { item.optString("AuthorId") }
+                .ifBlank { item.optString("authorId") }
+                .ifBlank { return@mapObjects null }
+            MusicPlaylist(
+                id = "${platform.id}-artist-$id",
+                title = item.optString("singername")
+                    .ifBlank { item.optString("singerName") }
+                    .ifBlank { item.optString("AuthorName") }
+                    .ifBlank { item.optString("authorName") }
+                    .clean(defaultCollectionTitle(PlaylistKind.Artist)),
+                subtitle = item.optString("intro")
+                    .ifBlank { item.optString("Intro") }
+                    .ifBlank { item.optString("Auxiliary") }
+                    .clean(platform.label),
+                coverUrl = item.firstArtworkUrl(
+                    listOf("Avatar", "avatar", "FirstFrameImage", "firstFrameImage", "imgurl", "ImgUrl", "Image", "image"),
+                    fallback = ""
+                ),
+                songs = emptyList(),
+                kind = PlaylistKind.Artist,
+                albumCount = item.firstInt(listOf("AlbumCount", "albumCount", "albumcount")),
+                songCount = item.firstInt(listOf("AudioCount", "audioCount", "songcount", "SongCount", "songCount")),
+                mvCount = item.firstInt(listOf("VideoCount", "videoCount", "MVCount", "mvCount"))
+            )
+        }
+    }
+
+    private fun searchQqPlaylists(query: String, page: Int, limit: Int): List<MusicPlaylist> {
+        val json = getJson(
+            "http://c.y.qq.com/soso/fcgi-bin/client_music_search_songlist?page_no=${page - 1}" +
+                "&num_per_page=$limit&format=json&query=${query.urlEncode()}" +
+                "&remoteplace=txt.yqq.playlist&inCharset=utf8&outCharset=utf-8",
+            headers = mapOf(
+                "Referer" to "http://y.qq.com/portal/search.html",
+                "User-Agent" to desktopUserAgent
+            )
+        ) ?: return emptyList()
+        return json.optJSONObject("data")?.optJSONArray("list").orEmpty().mapObjects { item ->
+            val id = item.optString("dissid").ifBlank { item.optString("docid") }.ifBlank { return@mapObjects null }
+            val creator = item.optJSONObject("creator")
+            MusicPlaylist(
+                id = "${platform.id}-playlist-$id",
+                title = item.optString("dissname").clean(defaultCollectionTitle(PlaylistKind.Playlist)),
+                subtitle = creator?.optString("name").clean(platform.label),
+                coverUrl = item.optString("imgurl").toArtworkUrl(fallback = ""),
+                songs = emptyList(),
+                kind = PlaylistKind.Playlist,
+                description = item.optString("introduction").htmlEntityDecode(),
+                songCount = item.optInt("song_count", item.optInt("copyrightnum", 0))
+            )
+        }
+    }
+
+    private fun searchQqAlbums(query: String, page: Int, limit: Int): List<MusicPlaylist> =
+        searchQqCollections(query, page, limit, type = 8, kind = PlaylistKind.Album)
+            .ifEmpty { searchQqSmartCollections(query, page, limit, PlaylistKind.Album) }
+
+    private fun searchQqArtists(query: String, page: Int, limit: Int): List<MusicPlaylist> =
+        searchQqCollections(query, page, limit, type = 9, kind = PlaylistKind.Artist)
+            .ifEmpty { searchQqSmartCollections(query, page, limit, PlaylistKind.Artist) }
+
+    private fun searchQqCollections(query: String, page: Int, limit: Int, type: Int, kind: PlaylistKind): List<MusicPlaylist> {
+        val json = getJson(
+            "https://c.y.qq.com/soso/fcgi-bin/client_search_cp?ct=24&qqmusic_ver=1298" +
+                "&remoteplace=txt.yqq.collection&t=$type&p=$page&n=$limit&w=${query.urlEncode()}&format=json",
+            headers = mapOf("Referer" to "https://y.qq.com/")
+        ) ?: return emptyList()
+        val container = when (kind) {
+            PlaylistKind.Playlist -> json.optJSONObject("data")?.optJSONObject("songlist")
+            PlaylistKind.Album -> json.optJSONObject("data")?.optJSONObject("album")
+            PlaylistKind.Artist -> json.optJSONObject("data")?.optJSONObject("singer")
+            else -> null
+        }
+        return container?.optJSONArray("list").orEmpty().mapObjects { item ->
+            val id = item.optString("dissid")
+                .ifBlank { item.optString("albumMID") }
+                .ifBlank { item.optString("album_mid") }
+                .ifBlank { item.optString("singermid") }
+                .ifBlank { item.optString("singerMID") }
+                .ifBlank { item.optString("id") }
+                .ifBlank { return@mapObjects null }
+            val title = item.optString("dissname")
+                .ifBlank { item.optString("albumName") }
+                .ifBlank { item.optString("albumname") }
+                .ifBlank { item.optString("singerName") }
+                .ifBlank { item.optString("singername") }
+                .clean(defaultCollectionTitle(kind))
+            val cover = item.optString("imgurl")
+                .ifBlank { item.optString("albumPic") }
+                .ifBlank { item.optString("singerPic") }
+                .ifBlank { item.optString("pic") }
+                .ifBlank { item.optString("logo") }
+                .ifBlank { item.optString("cover") }
+            val normalizedCover = when {
+                cover.isNotBlank() -> cover.toArtworkUrl(fallback = "")
+                kind == PlaylistKind.Album -> qqAlbumCover(id)
+                kind == PlaylistKind.Artist -> qqSingerAvatar(id)
+                else -> ""
+            }
+            MusicPlaylist(
+                id = "${platform.id}-${kind.name.lowercase()}-$id",
+                title = title,
+                subtitle = item.optString("creator").ifBlank { item.optString("singerName") }.clean(platform.label),
+                coverUrl = normalizedCover,
+                songs = emptyList(),
+                kind = kind,
+                albumCount = item.firstInt(listOf("album_count", "albumCount", "album_num", "albumNum")),
+                songCount = item.firstInt(listOf("song_count", "song_count_new", "songNum", "songnum", "musicNum", "total_song")),
+                mvCount = item.firstInt(listOf("mv_count", "mvCount", "total_mv"))
+            )
+        }
+    }
+
+    private fun searchQqSmartCollections(
+        query: String,
+        page: Int,
+        limit: Int,
+        kind: PlaylistKind
+    ): List<MusicPlaylist> {
+        if (page > 1) return emptyList()
+        val json = getJson(
+            "https://c.y.qq.com/splcloud/fcgi-bin/smartbox_new.fcg?format=json&key=${query.urlEncode()}" +
+                "&g_tk=5381&loginUin=0&hostUin=0&inCharset=utf8&outCharset=utf-8" +
+                "&notice=0&platform=yqq.json&needNewCode=0",
+            headers = mapOf("Referer" to "https://y.qq.com/", "User-Agent" to desktopUserAgent)
+        ) ?: return emptyList()
+        val key = if (kind == PlaylistKind.Artist) "singer" else "album"
+        return json.optJSONObject("data")?.optJSONObject(key)?.optJSONArray("itemlist").orEmpty()
+            .mapObjects { item ->
+                val mid = item.optString("mid").ifBlank { item.optString("id") }.ifBlank { return@mapObjects null }
+                MusicPlaylist(
+                    id = "${platform.id}-${kind.name.lowercase()}-$mid",
+                    title = item.optString("name").clean(defaultCollectionTitle(kind)),
+                    subtitle = item.optString("singer").clean(platform.label),
+                    coverUrl = item.optString("pic").toArtworkUrl(fallback = "").ifBlank {
+                        if (kind == PlaylistKind.Artist) qqSingerAvatar(mid) else qqAlbumCover(mid)
+                    },
+                    songs = emptyList(),
+                    kind = kind,
+                    albumCount = item.firstInt(listOf("album_count", "albumCount", "albumNum")),
+                    songCount = item.firstInt(listOf("song_count", "songCount", "songnum", "songNum", "musicNum")),
+                    mvCount = item.firstInt(listOf("mv_count", "mvCount"))
+                )
+            }
+            .take(limit)
+    }
+
+    private fun searchMiguPlaylists(query: String, page: Int, limit: Int): List<MusicPlaylist> =
+        searchMiguCollections(query, page, limit, switch = "%22songlist%22%3A1", key = "songListResultData", kind = PlaylistKind.Playlist)
+
+    private fun searchMiguAlbums(query: String, page: Int, limit: Int): List<MusicPlaylist> =
+        searchMiguCollections(query, page, limit, switch = "%22album%22%3A1", key = "albumResultData", kind = PlaylistKind.Album)
+
+    private fun searchMiguArtists(query: String, page: Int, limit: Int): List<MusicPlaylist> =
+        searchMiguCollections(query, page, limit, switch = "%22singer%22%3A1", key = "singerResultData", kind = PlaylistKind.Artist)
+
+    private fun searchMiguCollections(
+        query: String,
+        page: Int,
+        limit: Int,
+        switch: String,
+        key: String,
+        kind: PlaylistKind
+    ): List<MusicPlaylist> {
+        val time = System.currentTimeMillis().toString()
+        val sign = miguSignature(time, query)
+        val json = getJson(
+            "https://jadeite.migu.cn/music_search/v3/search/searchAll?isCorrect=0&isCopyright=1" +
+                "&searchSwitch=%7B$switch%7D&pageSize=$limit&text=${query.urlEncode()}&pageNo=$page&sort=0&sid=USS",
+            headers = mapOf(
+                "uiVersion" to "A_music_3.6.1",
+                "deviceId" to miguDeviceId,
+                "timestamp" to time,
+                "sign" to sign,
+                "channel" to "0146921",
+                "User-Agent" to mobileUserAgent
+            )
+        ) ?: return emptyList()
+        val resultList = json.optJSONObject(key)?.optJSONArray("resultList").orEmpty()
+        return resultList.mapObjects { item ->
+            val id = item.optString("id")
+                .ifBlank { item.optString("songListId") }
+                .ifBlank { item.optString("albumId") }
+                .ifBlank { item.optString("singerId") }
+                .ifBlank { return@mapObjects null }
+            MusicPlaylist(
+                id = "${platform.id}-${kind.name.lowercase()}-$id",
+                title = item.optString("name").clean(defaultCollectionTitle(kind)),
+                subtitle = item.optString("singer").ifBlank { item.optString("summary") }.clean(platform.label),
+                coverUrl = item.firstArtworkUrl(
+                    listOf("img3", "img2", "img1", "img", "pic", "picUrl", "cover", "coverUrl", "singerPic", "albumPic", "songListPic"),
+                    fallback = ""
+                ),
+                songs = emptyList(),
+                kind = kind,
+                albumCount = item.firstInt(listOf("albumNum", "albumCount")),
+                songCount = item.firstInt(listOf("musicNum", "songNum", "songCount", "total", "count")),
+                mvCount = item.firstInt(listOf("mvNum", "mvCount"))
+            )
+        }
+    }
+
+    private fun kuwoCollectionDetail(playlist: MusicPlaylist): MusicPlaylist? {
+        val id = playlist.rawCollectionId()
+        if (id.isBlank()) return null
+        return when (playlist.kind) {
+            PlaylistKind.Artist -> {
+                val songs = searchKuwo(playlist.title, page = 1, limit = 50)
+                val albums = kuwoArtistAlbums(id, limit = 40)
+                playlist.copy(
+                    coverUrl = playlist.coverUrl.ifBlank { albums.firstOrNull()?.coverUrl.orEmpty() },
+                    songs = songs,
+                    songCount = playlist.songCount.coerceAtLeast(songs.size),
+                    albumCount = playlist.albumCount.coerceAtLeast(albums.size),
+                    albums = albums
+                )
+            }
+            else -> null
+        }
+    }
+
+    private fun kuwoArtistAlbums(id: String, limit: Int): List<MusicPlaylist> {
+        val json = getJson(
+            "http://search.kuwo.cn/r.s?stype=albumlist&artistid=${id.urlEncode()}" +
+                "&pn=0&rn=${limit.coerceIn(1, 80)}&encoding=utf8&rformat=json&vipver=1&newver=1"
+        ) ?: return emptyList()
+        return json.optJSONArray("albumlist").orEmpty()
+            .mapObjects { item ->
+                val albumId = item.optString("id")
+                    .ifBlank { item.optString("albumid") }
+                    .ifBlank { return@mapObjects null }
+                MusicPlaylist(
+                    id = "${platform.id}-album-$albumId",
+                    title = item.optString("name")
+                        .ifBlank { item.optString("album") }
+                        .clean(defaultCollectionTitle(PlaylistKind.Album)),
+                    subtitle = item.optString("artist").clean(platform.label),
+                    coverUrl = item.kuwoCoverUrl(kind = PlaylistKind.Album, fallback = ""),
+                    songs = emptyList(),
+                    kind = PlaylistKind.Album,
+                    description = item.optString("info").clean(),
+                    songCount = item.firstInt(listOf("musiccnt", "musicNum", "songCount", "SONGNUM"))
+                )
+            }
+            .distinctBy { it.id }
+    }
+
+    private fun kugouCollectionDetail(playlist: MusicPlaylist): MusicPlaylist? {
+        val id = playlist.rawCollectionId()
+        if (id.isBlank()) return null
+        return when (playlist.kind) {
+            PlaylistKind.Album -> {
+                val songs = kugouAlbumSongs(id, page = 1, limit = 80)
+                playlist.copy(songs = songs, coverUrl = playlist.coverUrl.ifBlank { songs.firstOrNull()?.coverUrl.orEmpty() })
+            }
+            PlaylistKind.Artist -> {
+                val songs = kugouArtistSongs(id, page = 1, limit = 80)
+                val albums = kugouArtistAlbums(id, page = 1, limit = 80)
+                val info = getJson("http://mobiles.kugou.com/api/v5/singer/info?singerid=${id.urlEncode()}")
+                    ?.optJSONObject("data")
+                playlist.copy(
+                    title = info?.optString("singername").clean().ifBlank { playlist.title },
+                    description = info?.optString("profile").clean().ifBlank { playlist.description },
+                    coverUrl = info?.optString("imgurl").orEmpty().toKugouCover().ifBlank { playlist.coverUrl },
+                    songs = songs,
+                    songCount = listOf(
+                        info?.optInt("songcount", 0) ?: 0,
+                        playlist.songCount,
+                        songs.size
+                    ).maxOrNull() ?: songs.size,
+                    albumCount = listOf(
+                        info?.optInt("albumcount", 0) ?: 0,
+                        info?.optInt("albumCount", 0) ?: 0,
+                        playlist.albumCount,
+                        albums.size
+                    ).maxOrNull() ?: albums.size,
+                    albums = albums.ifEmpty { songs.albumShellsFromSongs(playlist, limit = 40) }
+                )
+            }
+            else -> null
+        }
+    }
+
+    private fun kugouAlbumSongs(id: String, page: Int, limit: Int): List<Song> {
+        val json = getJson(
+            "http://mobiles.kugou.com/api/v3/album/song?version=9108&albumid=${id.urlEncode()}" +
+                "&plat=0&pagesize=${limit.coerceIn(1, 100)}&area_code=0&page=$page&with_res_tag=0"
+        ) ?: return emptyList()
+        return json.optJSONObject("data")?.optJSONArray("info").orEmpty()
+            .mapObjects { item -> item.toKugouDetailSong() }
+    }
+
+    private fun kugouArtistSongs(id: String, page: Int, limit: Int): List<Song> {
+        if (id == "0" || id.isBlank()) return emptyList()
+        val json = getJson(
+            "http://mobiles.kugou.com/api/v5/singer/song?singerid=${id.urlEncode()}" +
+                "&page=$page&pagesize=${limit.coerceIn(1, 100)}"
+        ) ?: return emptyList()
+        return json.optJSONObject("data")?.optJSONArray("info").orEmpty()
+            .mapObjects { item -> item.toKugouDetailSong() }
+    }
+
+    private fun kugouArtistAlbums(id: String, page: Int, limit: Int): List<MusicPlaylist> {
+        if (id == "0" || id.isBlank()) return emptyList()
+        val json = getJson(
+            "http://mobiles.kugou.com/api/v5/singer/song?singerid=${id.urlEncode()}" +
+                "&page=$page&pagesize=${limit.coerceIn(1, 100)}"
+        ) ?: return emptyList()
+        return json.optJSONObject("data")?.optJSONArray("info").orEmpty()
+            .mapObjects { item ->
+                val albumId = item.optString("AlbumID")
+                    .ifBlank { item.optString("album_id") }
+                    .ifBlank { item.optString("albumid") }
+                    .ifBlank { return@mapObjects null }
+                MusicPlaylist(
+                    id = "${platform.id}-album-$albumId",
+                    title = item.optString("AlbumName")
+                        .ifBlank { item.optString("album_name") }
+                        .ifBlank { item.optString("albumname") }
+                        .clean(defaultCollectionTitle(PlaylistKind.Album)),
+                    subtitle = item.optString("SingerName")
+                        .ifBlank { item.optString("singername") }
+                        .clean(platform.label),
+                    coverUrl = item.optString("Image")
+                        .ifBlank { item.optString("imgurl") }
+                        .ifBlank { item.optString("img") }
+                        .ifBlank { item.optString("image") }
+                        .ifBlank { item.optJSONObject("trans_param")?.optString("union_cover").orEmpty() }
+                        .toKugouCover(fallback = ""),
+                    songs = emptyList(),
+                    kind = PlaylistKind.Album,
+                    songCount = item.firstInt(listOf("song_count", "songcount", "SongCount", "AudioCount", "audioCount"))
+                )
+            }
+            .distinctBy { it.id }
+    }
+
+    private fun qqCollectionDetail(playlist: MusicPlaylist): MusicPlaylist? {
+        val id = playlist.rawCollectionId()
+        if (id.isBlank()) return null
+        return when (playlist.kind) {
+            PlaylistKind.Playlist -> {
+                val json = getJson(
+                    "https://c.y.qq.com/qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg" +
+                        "?type=1&json=1&utf8=1&onlysong=0&new_format=1&disstid=${id.urlEncode()}" +
+                        "&loginUin=0&hostUin=0&format=json&inCharset=utf8&outCharset=utf-8" +
+                        "&notice=0&platform=yqq.json&needNewCode=0",
+                    headers = mapOf("Origin" to "https://y.qq.com", "Referer" to "https://y.qq.com/")
+                ) ?: return null
+                val detail = json.optJSONArray("cdlist")?.optJSONObject(0) ?: return null
+                val songs = detail.optJSONArray("songlist").orEmpty().mapObjects { item -> item.toQqSong() }
+                playlist.copy(
+                    title = detail.optString("dissname").clean().ifBlank { playlist.title },
+                    subtitle = detail.optString("nickname").clean().ifBlank { playlist.subtitle },
+                    description = detail.optString("desc").htmlEntityDecode(),
+                    coverUrl = detail.optString("logo").clean().ifBlank { playlist.coverUrl },
+                    songs = songs,
+                    songCount = songs.size
+                )
+            }
+            PlaylistKind.Artist -> {
+                val (songs, data) = qqArtistSongs(id, offset = 0, limit = 80)
+                val info = data?.optJSONObject("singer_info") ?: data?.optJSONObject("singerInfo")
+                val albums = artistAlbumFallbacks(playlist, songs, limit = 40)
+                playlist.copy(
+                    title = info?.optString("name").clean().ifBlank { playlist.title },
+                    coverUrl = info?.optString("pic").clean().ifBlank { playlist.coverUrl.ifBlank { qqSingerAvatar(id) } },
+                    songs = songs,
+                    songCount = listOf(
+                        data?.optInt("total_song", 0) ?: 0,
+                        playlist.songCount,
+                        songs.size
+                    ).maxOrNull() ?: songs.size,
+                    albumCount = (data?.optInt("total_album", playlist.albumCount) ?: playlist.albumCount)
+                        .coerceAtLeast(albums.size),
+                    mvCount = data?.optInt("total_mv", playlist.mvCount) ?: playlist.mvCount,
+                    albums = albums
+                )
+            }
+            else -> null
+        }
+    }
+
+    private fun qqArtistSongs(id: String, offset: Int, limit: Int): Pair<List<Song>, JSONObject?> {
+        val payload = JSONObject()
+            .put("comm", JSONObject().put("ct", 24).put("cv", 0))
+            .put(
+                "singer",
+                JSONObject()
+                    .put("module", "music.web_singer_info_svr")
+                    .put("method", "get_singer_detail_info")
+                    .put(
+                        "param",
+                        JSONObject()
+                            .put("sort", 5)
+                            .put("singermid", id)
+                            .put("sin", offset.coerceAtLeast(0))
+                            .put("num", limit.coerceIn(1, 80))
+                    )
+            )
+        val json = postJson(
+            "https://u.y.qq.com/cgi-bin/musicu.fcg",
+            payload.toString().toRequestBody(jsonMediaType),
+            headers = mapOf("Referer" to "https://y.qq.com/", "Origin" to "https://y.qq.com", "User-Agent" to desktopUserAgent)
+        ) ?: return emptyList<Song>() to null
+        val block = json.optJSONObject("singer")
+        val data = block?.optJSONObject("data")
+        val songs = data?.optJSONArray("songlist").orEmpty().mapObjects { raw ->
+            val item = raw.optJSONObject("track_info")
+                ?: raw.optJSONObject("songInfo")
+                ?: raw.optJSONObject("songinfo")
+                ?: raw.optJSONObject("song")
+                ?: raw
+            item.toQqSong()
+        }
+        return songs to data
+    }
+
+    private fun miguCollectionDetail(playlist: MusicPlaylist): MusicPlaylist? {
+        val id = playlist.rawCollectionId()
+        if (id.isBlank()) return null
+        return when (playlist.kind) {
+            PlaylistKind.Playlist -> {
+                val listJson = getJson(
+                    "https://app.c.nf.migu.cn/MIGUM3.0/resource/playlist/song/v2.0" +
+                        "?pageNo=1&pageSize=80&playlistId=${id.urlEncode()}",
+                    headers = miguDetailHeaders
+                )
+                val infoJson = getJson(
+                    "https://app.c.nf.migu.cn/MIGUM3.0/resource/playlist/v2.0?playlistId=${id.urlEncode()}",
+                    headers = miguDetailHeaders
+                )?.optJSONObject("data")
+                val songs = listJson?.optJSONObject("data")?.optJSONArray("songList").orEmpty()
+                    .mapObjects { item -> item.toMiguSong() }
+                playlist.copy(
+                    title = infoJson?.optString("title").clean().ifBlank { playlist.title },
+                    subtitle = infoJson?.optString("ownerName").clean().ifBlank { playlist.subtitle },
+                    description = infoJson?.optString("summary").clean().ifBlank { playlist.description },
+                    coverUrl = infoJson?.optJSONObject("imgItem")?.optString("img").orEmpty().toMiguCover().ifBlank { playlist.coverUrl },
+                    songs = songs,
+                    songCount = infoJson?.optInt("musicNum", playlist.songCount) ?: playlist.songCount
+                )
+            }
+            PlaylistKind.Album -> {
+                val json = getJson(
+                    "http://app.c.nf.migu.cn/MIGUM2.0/v1.0/content/queryAlbumSong?albumId=${id.urlEncode()}&pageNo=1",
+                    headers = miguDetailHeaders
+                )
+                val songs = json?.optJSONObject("data")?.optJSONArray("songList").orEmpty()
+                    .mapObjects { item -> item.toMiguSong() }
+                playlist.copy(songs = songs, coverUrl = playlist.coverUrl.ifBlank { songs.firstOrNull()?.coverUrl.orEmpty() })
+            }
+            PlaylistKind.Artist -> {
+                val songs = searchMigu(playlist.title, page = 1, limit = 50)
+                val albums = artistAlbumFallbacks(playlist, songs, limit = 40)
+                playlist.copy(
+                    coverUrl = playlist.coverUrl.ifBlank { songs.firstOrNull()?.coverUrl.orEmpty() },
+                    songs = songs,
+                    songCount = playlist.songCount.coerceAtLeast(songs.size),
+                    albumCount = playlist.albumCount.coerceAtLeast(albums.size),
+                    albums = albums
+                )
+            }
+            else -> null
+        }
+    }
+
+    private fun MusicPlaylist.withFallbackSongs(): MusicPlaylist {
+        val songs = fallbackSongsFor(this, limit = 50, page = 1)
+        return copy(songs = songs, coverUrl = coverUrl.ifBlank { songs.firstOrNull()?.coverUrl.orEmpty() })
+    }
+
+    private fun fallbackSongsFor(collection: MusicPlaylist, limit: Int, page: Int): List<Song> {
+        val subtitle = collection.subtitle.takeIf {
+            it.isNotBlank() && it != platform.label && !it.contains("首")
+        }.orEmpty()
+        val query = listOf(collection.title, subtitle).filter { it.isNotBlank() }.joinToString(" ").ifBlank {
+            collection.title.ifBlank { "华语流行" }
+        }
+        return when (platform.id) {
+            SourcePlatformIds.KUWO -> searchKuwo(query, page, limit)
+            SourcePlatformIds.KUGOU -> searchKugou(query, page, limit)
+            SourcePlatformIds.QQ -> searchQq(query, page, limit)
+            SourcePlatformIds.MIGU -> searchMigu(query, page, limit)
+            else -> emptyList()
+        }
+    }
+
+    private fun artistAlbumFallbacks(
+        artist: MusicPlaylist,
+        songs: List<Song>,
+        limit: Int
+    ): List<MusicPlaylist> {
+        val fromSongs = songs.albumShellsFromSongs(artist, limit)
+        val searched = when (platform.id) {
+            SourcePlatformIds.KUWO -> kuwoArtistAlbums(artist.rawCollectionId(), limit)
+                .ifEmpty { searchKuwoAlbums(artist.title, page = 1, limit = limit) }
+            SourcePlatformIds.KUGOU -> kugouArtistAlbums(artist.rawCollectionId(), page = 1, limit = limit)
+                .ifEmpty { searchKugouAlbums(artist.title, page = 1, limit = limit) }
+            SourcePlatformIds.QQ -> searchQqAlbums(artist.title, page = 1, limit = limit)
+            SourcePlatformIds.MIGU -> searchMiguAlbums(artist.title, page = 1, limit = limit)
+            else -> emptyList()
+        }.filterForArtist(artist.title)
+        return (fromSongs + searched)
+            .distinctBy { it.id }
+            .take(limit.coerceAtLeast(1))
+    }
+
+    private fun List<Song>.albumShellsFromSongs(
+        artist: MusicPlaylist,
+        limit: Int
+    ): List<MusicPlaylist> =
+        filter { it.album.isNotBlank() && it.album != defaultCollectionTitle(PlaylistKind.Album) }
+            .groupBy { "${it.sourceId}:${it.album.cacheKey()}" }
+            .values
+            .mapNotNull { albumSongs ->
+                val first = albumSongs.firstOrNull() ?: return@mapNotNull null
+                MusicPlaylist(
+                    id = "${first.sourceId}-album-${first.album.cacheKey()}",
+                    title = first.album,
+                    subtitle = artist.title.ifBlank { first.artist },
+                    coverUrl = first.coverUrl,
+                    songs = emptyList(),
+                    kind = PlaylistKind.Album,
+                    songCount = albumSongs.size
+                )
+            }
+            .take(limit.coerceAtLeast(1))
+
+    private fun List<MusicPlaylist>.filterForArtist(artistName: String): List<MusicPlaylist> {
+        val token = artistName.cacheKey()
+        if (token.isBlank()) return this
+        val matched = filter { playlist ->
+            playlist.subtitle.cacheKey().contains(token) ||
+                playlist.description.cacheKey().contains(token) ||
+                playlist.title.cacheKey().contains(token)
+        }
+        return matched.ifEmpty { this }
+    }
+
+    private fun MusicPlaylist.rawCollectionId(): String =
+        id.substringAfterLast('-', missingDelimiterValue = id).trim()
+
+    private fun MusicPlaylist.hasCollectionDetailPayload(): Boolean =
+        songs.isNotEmpty() || albums.isNotEmpty() || coverUrl.isNotBlank() || description.isNotBlank()
+
+    private fun MusicPlaylist.bestCover(): String =
+        coverUrl.takeIf { it.isNotBlank() && it != defaultCover }
+            ?: songs.firstOrNull { it.coverUrl.isNotBlank() && it.coverUrl != defaultCover }?.coverUrl
+            ?: albums.firstOrNull { it.coverUrl.isNotBlank() && it.coverUrl != defaultCover }?.coverUrl
+            ?: coverUrl.ifBlank { defaultCover }
+
+    private fun MusicPlaylist.collectionSubtitleAfterDetail(): String =
+        when {
+            songs.isEmpty() -> subtitle
+            kind == PlaylistKind.Artist -> {
+                val total = songCount.coerceAtLeast(songs.size)
+                if (total > 0) "${platform.label} · $total 首单曲" else platform.label
+            }
+            else -> "${songs.size} 首歌曲"
+        }
+
+    private fun JSONObject.toKugouDetailSong(): Song? {
+        val id = optString("Audioid")
+            .ifBlank { optString("audio_id") }
+            .ifBlank { optString("album_audio_id") }
+            .ifBlank { return null }
+        val hash = optString("FileHash").ifBlank { optString("hash") }.ifBlank { optString("Hash") }
+        val filename = optString("filename").clean()
+        val title = optString("SongName")
+            .ifBlank { optString("songname") }
+            .ifBlank { optString("song_name") }
+            .ifBlank { filename.substringAfter(" - ", filename) }
+            .clean("未知歌曲")
+        val artist = optString("SingerName")
+            .ifBlank { optString("singername") }
+            .ifBlank { optString("author_name") }
+            .ifBlank { filename.substringBefore(" - ", "") }
+            .clean("未知歌手")
+        val cover = optString("Image")
+            .ifBlank { optString("imgurl") }
+            .ifBlank { optString("image") }
+            .ifBlank { optJSONObject("trans_param")?.optString("union_cover").orEmpty() }
+            .toKugouCover()
+        return Song(
+            id = id,
+            title = title,
+            artist = artist,
+            album = optString("AlbumName").ifBlank { optString("album_name") }.clean("未知专辑"),
+            coverUrl = cover,
+            durationMs = optLong("Duration", optLong("duration", 0L)).secondsToMillis(),
+            sourceId = platform.id,
+            providerIds = platformIdentity(id) + mapOf(
+                "kg_hash" to hash,
+                "kg_album_id" to optString("AlbumID").ifBlank { optString("album_id") }
+            )
+        )
+    }
+
+    private fun JSONObject.toQqSong(): Song? {
+        val songMid = optString("mid").ifBlank { optString("songmid") }.ifBlank { return null }
+        val album = optJSONObject("album")
+        val albumMid = album?.optString("mid").orEmpty()
+            .ifBlank { album?.optString("pmid").orEmpty().substringBefore('_') }
+        val singer = optJSONArray("singer").names("name").clean("未知歌手")
+        val firstSingerMid = optJSONArray("singer")?.optJSONObject(0)?.optString("mid").orEmpty()
+        val songId = optLong("id", optLong("songid", 0L)).takeIf { it > 0L }?.toString().orEmpty()
+        return Song(
+            id = songMid,
+            title = optString("title").ifBlank { optString("name") }.ifBlank { optString("songname") }.clean("未知歌曲"),
+            artist = singer,
+            album = album?.optString("name").orEmpty().ifBlank { album?.optString("title").orEmpty() }.clean("未知专辑"),
+            coverUrl = if (albumMid.isNotBlank()) qqAlbumCover(albumMid) else firstSingerMid.takeIf { it.isNotBlank() }?.let(::qqSingerAvatar) ?: defaultCover,
+            durationMs = optLong("interval", 0L).secondsToMillis(),
+            sourceId = platform.id,
+            providerIds = platformIdentity(songMid) + mapOf(
+                "tx_song_id" to songId,
+                "tx_media_mid" to (optJSONObject("file")?.optString("media_mid").orEmpty()),
+                "tx_album_mid" to albumMid,
+                "tx_singer_mid" to firstSingerMid
+            )
+        )
+    }
+
+    private fun JSONObject.toMiguSong(): Song? {
+        val id = optString("songId")
+            .ifBlank { optString("contentId") }
+            .ifBlank { optString("copyrightId") }
+            .ifBlank { return null }
+        val copyrightId = optString("copyrightId")
+        val cover = optString("img3")
+            .ifBlank { optString("img2") }
+            .ifBlank { optString("img1") }
+            .ifBlank { optJSONArray("albumImgs")?.optJSONObject(0)?.optString("img").orEmpty() }
+            .toMiguCover()
+        return Song(
+            id = id,
+            title = optString("songName").ifBlank { optString("name") }.clean("未知歌曲"),
+            artist = optJSONArray("singerList").names("name").ifBlank { optString("singer") }.clean("未知歌手"),
+            album = optString("album").clean("未知专辑"),
+            coverUrl = cover,
+            durationMs = optLong("duration", 0L).secondsToMillis(),
+            sourceId = platform.id,
+            providerIds = platformIdentity(id) + mapOf(
+                "mg_copyright_id" to copyrightId,
+                "mg_album_id" to optString("albumId"),
+                "mg_lrc_url" to optString("lrcUrl"),
+                "mg_mrc_url" to optString("mrcUrl").ifBlank { optString("mrcurl") },
+                "mg_trc_url" to optString("trcUrl")
+            )
+        )
+    }
+
+    private fun defaultCollectionTitle(kind: PlaylistKind): String = when (kind) {
+        PlaylistKind.Album -> "未知专辑"
+        PlaylistKind.Artist -> "未知歌手"
+        else -> "未知歌单"
+    }
+
     private fun kuwoComments(song: Song, sort: PlaylistCommentSort, limit: Int): PlaylistCommentBundle {
         val sid = song.providerIds[platform.lxId] ?: song.providerIds[platform.id] ?: song.id
         val type = if (sort == PlaylistCommentSort.Hot) "get_rec_comment" else "get_comment"
@@ -258,7 +1119,7 @@ class LxPlatformMusicSource(
         }.mapObjects { item ->
             PlaylistComment(
                 id = item.optString("id").ifBlank { item.optString("u_id") },
-                authorName = item.optString("u_name").clean("酷我用户"),
+                authorName = item.optString("u_name").clean("酷窝用户"),
                 authorAvatarUrl = item.optString("u_pic").clean(),
                 content = item.optString("msg").clean("这条评论暂时没有内容"),
                 timeLabel = item.optLong("time", 0L).secondsToCommentTime(),
@@ -295,7 +1156,7 @@ class LxPlatformMusicSource(
         val comments = json.optJSONArray("list").orEmpty().mapObjects { item ->
             PlaylistComment(
                 id = item.optString("id").ifBlank { item.optString("user_id") },
-                authorName = item.optString("user_name").clean("酷狗用户"),
+                authorName = item.optString("user_name").clean("酷构用户"),
                 authorAvatarUrl = item.optString("user_pic").clean(),
                 content = item.optString("content").clean("这条评论暂时没有内容"),
                 timeLabel = item.optString("addtime").clean(),
@@ -340,7 +1201,7 @@ class LxPlatformMusicSource(
             val content = item.optString("rootcommentcontent").replace("\\n", "\n").clean("这条评论暂时没有内容")
             PlaylistComment(
                 id = "${item.optString("rootcommentid")}_${item.optString("commentid")}",
-                authorName = item.optString("rootcommentnick").removePrefix("@").clean("QQ 音乐用户"),
+                authorName = item.optString("rootcommentnick").removePrefix("@").clean("轻雀用户"),
                 authorAvatarUrl = item.optString("avatarurl").clean(),
                 content = content,
                 timeLabel = item.optString("time").toQqCommentTime(),
@@ -404,7 +1265,7 @@ class LxPlatformMusicSource(
         val comments = data.optJSONArray("Comments").orEmpty().mapObjects { item ->
             PlaylistComment(
                 id = "${item.optString("SeqNo")}_${item.optString("CmId")}",
-                authorName = item.optString("Nick").clean("QQ 音乐用户"),
+                authorName = item.optString("Nick").clean("轻雀用户"),
                 authorAvatarUrl = item.optString("Avatar").clean(),
                 content = item.optString("Content").replace("\\n", "\n").clean("这条评论暂时没有内容"),
                 timeLabel = item.optString("PubTime").toQqCommentTime(),
@@ -443,7 +1304,7 @@ class LxPlatformMusicSource(
             val user = item.optJSONObject("user")
             PlaylistComment(
                 id = item.optString("commentId").ifBlank { item.optString("replyId") },
-                authorName = user?.optString("nickName").clean("咪咕用户"),
+                authorName = user?.optString("nickName").clean("米谷用户"),
                 authorAvatarUrl = user?.optString("middleIcon").clean()
                     .ifBlank { user?.optString("bigIcon").clean() }
                     .ifBlank { user?.optString("smallIcon").clean() },
@@ -592,7 +1453,7 @@ class LxPlatformMusicSource(
         }
     }
 
-    data class LxPlatform(
+        data class LxPlatform(
         val id: String,
         val lxId: String,
         val label: String,
@@ -602,8 +1463,8 @@ class LxPlatformMusicSource(
 
     companion object {
         private val defaultClient = OkHttpClient.Builder()
-            .connectTimeout(6, TimeUnit.SECONDS)
-            .readTimeout(10, TimeUnit.SECONDS)
+            .connectTimeout(4, TimeUnit.SECONDS)
+            .readTimeout(6, TimeUnit.SECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
             .build()
@@ -623,24 +1484,59 @@ class LxPlatformMusicSource(
             "User-Agent" to mobileUserAgent,
             "channel" to "0146921"
         )
+        private val miguDetailHeaders = mapOf(
+            "Referer" to "https://m.music.migu.cn/",
+            "User-Agent" to mobileUserAgent,
+            "channel" to "0146921"
+        )
 
         fun kuwo(): LxPlatformMusicSource = LxPlatformMusicSource(
-            LxPlatform(SourcePlatformIds.KUWO, "kw", "酷我音乐", "内置酷我搜索与评论模块，播放交给自定义音源解析。", 0xFFFFA726)
+            LxPlatform(SourcePlatformIds.KUWO, "kw", "酷窝曲库", "内置搜索与评论模块，播放交给自定义源解析。", 0xFFFFA726)
         )
 
         fun kugou(): LxPlatformMusicSource = LxPlatformMusicSource(
-            LxPlatform(SourcePlatformIds.KUGOU, "kg", "酷狗音乐", "内置酷狗搜索与评论模块，播放交给自定义音源解析。", 0xFF42A5F5)
+            LxPlatform(SourcePlatformIds.KUGOU, "kg", "酷构曲库", "内置搜索与评论模块，播放交给自定义源解析。", 0xFF42A5F5)
         )
 
         fun qq(): LxPlatformMusicSource = LxPlatformMusicSource(
-            LxPlatform(SourcePlatformIds.QQ, "tx", "QQ 音乐", "内置 QQ 搜索与评论模块，播放交给自定义音源解析。", 0xFF66BB6A)
+            LxPlatform(SourcePlatformIds.QQ, "tx", "轻雀曲库", "内置搜索与评论模块，播放交给自定义源解析。", 0xFF66BB6A)
         )
 
         fun migu(): LxPlatformMusicSource = LxPlatformMusicSource(
-            LxPlatform(SourcePlatformIds.MIGU, "mg", "咪咕音乐", "内置咪咕搜索与评论模块，播放交给自定义音源解析。", 0xFFFF7043)
+            LxPlatform(SourcePlatformIds.MIGU, "mg", "米谷曲库", "内置搜索与评论模块，播放交给自定义源解析。", 0xFFFF7043)
         )
     }
 }
+
+private data class CachedSongs(
+    val items: List<Song>,
+    val expiresAt: Long
+)
+
+private data class CachedCollections(
+    val items: List<MusicPlaylist>,
+    val expiresAt: Long
+)
+
+private data class CachedCollectionDetail(
+    val item: MusicPlaylist,
+    val expiresAt: Long
+)
+
+private fun CachedSongs.takeIfFresh(): List<Song>? =
+    items.takeIf { expiresAt > System.currentTimeMillis() }
+
+private fun CachedCollections.takeIfFresh(): List<MusicPlaylist>? =
+    items.takeIf { expiresAt > System.currentTimeMillis() }
+
+private fun CachedCollectionDetail.takeIfFresh(): MusicPlaylist? =
+    item.takeIf { expiresAt > System.currentTimeMillis() }
+
+private fun cacheTtl(items: Collection<*>): Long =
+    System.currentTimeMillis() + if (items.isEmpty()) 30_000L else 3 * 60_000L
+
+private fun String.cacheKey(): String =
+    trim().lowercase(Locale.ROOT).replace(Regex("\\s+"), " ")
 
 private fun Request.Builder.headers(headers: Map<String, String>): Request.Builder = apply {
     if ("User-Agent" !in headers) header("User-Agent", "Mozilla/5.0 SiListen/0.3 Android")
@@ -692,42 +1588,121 @@ private fun String?.clean(fallback: String = ""): String {
 
 private fun String.htmlEntityDecode(): String =
     replace("&amp;", "&")
+        .replace("&nbsp;", " ")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
 
-private fun String.toMiguCover(): String =
-    clean().let { cover ->
-        when {
-            cover.isBlank() -> "https://images.unsplash.com/photo-1516280440614-37939bbacd81?w=900"
-            cover.startsWith("http://") || cover.startsWith("https://") -> cover
-            else -> "http://d.musicapp.migu.cn$cover"
-        }
+private const val fallbackArtworkUrl = "https://images.unsplash.com/photo-1516280440614-37939bbacd81?w=900"
+
+private fun String?.toArtworkUrl(fallback: String = fallbackArtworkUrl): String {
+    val cover = clean()
+        .replace("\\/", "/")
+        .replace("{size}", "500")
+        .replace("{0}", "500")
+        .replace("!400", "")
+    if (cover.isBlank()) return fallback
+    return when {
+        cover.startsWith("https://") || cover.startsWith("http://") -> cover
+            .preferHttpsForStableArtworkHosts()
+        cover.startsWith("//") -> "https:$cover"
+        cover.startsWith("/") -> "https://d.musicapp.migu.cn$cover"
+        cover.startsWith("albumcover/") -> "https://img1.kwcdn.kuwo.cn/star/${cover.toKuwoSizedPath("albumcover")}"
+        cover.startsWith("starheads/") -> "https://img1.kwcdn.kuwo.cn/star/${cover.toKuwoSizedPath("starheads")}"
+        else -> fallback
+    }
+}
+
+private fun String.preferHttpsForStableArtworkHosts(): String =
+    when {
+        startsWith("http://imge.kugou.com/", ignoreCase = true) -> replaceFirst("http://", "https://")
+        startsWith("http://singerimg.kugou.com/", ignoreCase = true) -> replaceFirst("http://", "https://")
+        startsWith("http://imgecnt.kugou.com/", ignoreCase = true) -> replaceFirst("http://", "https://")
+        startsWith("http://y.gtimg.cn/", ignoreCase = true) -> replaceFirst("http://", "https://")
+        else -> this
     }
 
-private fun JSONObject.kuwoCoverUrl(): String {
+private fun String.toMiguCover(fallback: String = fallbackArtworkUrl): String =
+    clean().let { cover ->
+        if (cover.isBlank()) fallback else cover.toArtworkUrl(fallback = fallback)
+    }
+
+private fun JSONObject.kuwoCoverUrl(
+    kind: PlaylistKind = PlaylistKind.Album,
+    fallback: String = fallbackArtworkUrl
+): String {
     val direct = optString("hts_MVPIC").clean()
         .ifBlank { optString("MVPIC").clean() }
-    if (direct.startsWith("http://") || direct.startsWith("https://")) return direct
+        .ifBlank { optString("hts_pic").clean() }
+        .ifBlank { optString("hts_img").clean() }
+        .ifBlank { optString("hts_PICPATH").clean() }
+        .ifBlank { optString("pic").clean() }
+        .ifBlank { optString("img").clean() }
+        .ifBlank { optString("image").clean() }
+        .ifBlank { optString("cover").clean() }
+        .ifBlank { optString("coverUrl").clean() }
+        .ifBlank { optString("web_albumpic").clean() }
+        .ifBlank { optString("web_artistpic").clean() }
+    direct.toArtworkUrl(fallback = "").takeIf { it.isNotBlank() }?.let { return it }
+
+    val folder = if (kind == PlaylistKind.Artist) "starheads" else "albumcover"
+    val picPath = optString("PICPATH").clean()
+        .ifBlank { optString("picpath").clean() }
+        .ifBlank { optString("picPath").clean() }
+    if (picPath.isNotBlank()) {
+        return "https://img1.kwcdn.kuwo.cn/star/${picPath.toKuwoSizedPath(folder)}"
+    }
 
     val albumShort = optString("web_albumpic_short").clean()
     if (albumShort.isNotBlank()) {
-        return "http://img1.kwcdn.kuwo.cn/star/albumcover/500/${albumShort.substringAfter('/')}"
+        return "https://img1.kwcdn.kuwo.cn/star/${albumShort.toKuwoSizedPath("albumcover")}"
     }
 
     val artistShort = optString("web_artistpic_short").clean()
     if (artistShort.isNotBlank()) {
-        return "http://img1.kwcdn.kuwo.cn/star/starheads/500/${artistShort.substringAfter('/')}"
+        return "https://img1.kwcdn.kuwo.cn/star/${artistShort.toKuwoSizedPath("starheads")}"
     }
 
-    return "https://images.unsplash.com/photo-1516280440614-37939bbacd81?w=900"
+    return fallback
 }
 
-private fun String.toKugouCover(): String {
+private fun String.toKugouCover(fallback: String = fallbackArtworkUrl): String {
     val cover = clean()
-    if (cover.isBlank()) return "https://images.unsplash.com/photo-1516280440614-37939bbacd81?w=900"
-    return cover.replace("{size}", "480")
+    if (cover.isBlank()) return fallback
+    return cover
+        .replace("{size}", "480")
+        .replace("{0}", "480")
+        .toArtworkUrl(fallback = fallback)
+}
+
+private fun JSONObject.firstArtworkUrl(keys: List<String>, fallback: String = fallbackArtworkUrl): String =
+    keys.firstNotNullOfOrNull { key ->
+        optString(key).toArtworkUrl(fallback = "").takeIf { it.isNotBlank() }
+    } ?: fallback
+
+private fun qqAlbumCover(albumMid: String): String =
+    if (albumMid.isBlank()) {
+        fallbackArtworkUrl
+    } else {
+        "https://y.gtimg.cn/music/photo_new/T002R500x500M000$albumMid.jpg"
+    }
+
+private fun qqSingerAvatar(singerMid: String): String =
+    if (singerMid.isBlank()) {
+        fallbackArtworkUrl
+    } else {
+        "https://y.gtimg.cn/music/photo_new/T001R500x500M000$singerMid.jpg"
+    }
+
+private fun String.toKuwoSizedPath(folder: String): String {
+    val path = trim().trimStart('/')
+        .removePrefix("$folder/")
+        .let { value ->
+            val firstSegment = value.substringBefore('/')
+            if (firstSegment.all(Char::isDigit) && '/' in value) value.substringAfter('/') else value
+        }
+    return "$folder/500/$path"
 }
 
 private fun String.decodeBase64Text(): String {

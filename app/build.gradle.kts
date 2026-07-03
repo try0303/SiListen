@@ -8,24 +8,11 @@ android {
     compileSdk = 37
 
     defaultConfig {
-        val neteaseApiLanBaseUrl =
-            (project.findProperty("neteaseApiLanBaseUrl") as String?)?.ifBlank { null }
-                ?: ""
-        val neteaseApiEmulatorBaseUrl =
-            (project.findProperty("neteaseApiEmulatorBaseUrl") as String?)?.ifBlank { null }
-                ?: "http://10.0.2.2:3000"
-        val neteaseApiLoopbackBaseUrl =
-            (project.findProperty("neteaseApiLoopbackBaseUrl") as String?)?.ifBlank { null }
-                ?: "http://127.0.0.1:3000"
-
         applicationId = "com.silisten.app"
         minSdk = 26
         targetSdk = 37
         versionCode = 1
         versionName = "0.1.0"
-        buildConfigField("String", "NETEASE_API_LAN_BASE_URL", "\"$neteaseApiLanBaseUrl\"")
-        buildConfigField("String", "NETEASE_API_EMULATOR_BASE_URL", "\"$neteaseApiEmulatorBaseUrl\"")
-        buildConfigField("String", "NETEASE_API_LOOPBACK_BASE_URL", "\"$neteaseApiLoopbackBaseUrl\"")
     }
 
     buildFeatures {

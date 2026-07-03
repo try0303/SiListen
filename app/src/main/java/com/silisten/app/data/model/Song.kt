@@ -45,6 +45,8 @@ data class MusicPlaylist(
     val albumCount: Int = 0,
     val songCount: Int = 0,
     val mvCount: Int = 0,
+    val creatorUserId: Long = 0L,
+    val subscribed: Boolean = false,
     val albums: List<MusicPlaylist> = emptyList()
 )
 

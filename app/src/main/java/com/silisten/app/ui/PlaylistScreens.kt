@@ -1,4 +1,4 @@
-﻿package com.silisten.app.ui
+package com.silisten.app.ui
 
 import android.Manifest
 import android.content.ContentValues
@@ -80,6 +80,7 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Comment
@@ -104,6 +105,7 @@ import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material.icons.rounded.Subtitles
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -116,6 +118,7 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -138,6 +141,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -268,6 +272,9 @@ fun PlaylistDetailScreen(
     commentsMessage: String?,
     isSubscribed: Boolean,
     isSubscriptionLoading: Boolean,
+    canShowComments: Boolean,
+    canShowSubscriptionAction: Boolean,
+    isSubscriptionLocked: Boolean,
     dark: Boolean,
     glassy: Boolean,
     onBack: () -> Unit,
@@ -289,6 +296,8 @@ fun PlaylistDetailScreen(
 ) {
     var showInlineSearch by remember(playlist.id) { mutableStateOf(songSearchQuery.isNotBlank()) }
     var actionSong by remember(playlist.id) { mutableStateOf<Song?>(null) }
+    var pendingCancelSubscription by remember(playlist.id) { mutableStateOf(false) }
+    val displayRoute = if (canShowComments) route else PlaylistRoute.Overview
     val pageColor = if (dark) Color(0xFF071008) else Color(0xFFF5F6F8)
     val cardColor = if (dark) Color(0xFF111A12) else Color.White
     val titleColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
@@ -354,84 +363,7 @@ fun PlaylistDetailScreen(
                                 .fillMaxSize()
                                 .padding(horizontal = 18.dp, vertical = 12.dp)
                         ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.animateContentSize(
-                                    animationSpec = spring(dampingRatio = 0.82f, stiffness = 520f)
-                                )
-                            ) {
-                                Spacer(Modifier.size(46.dp))
-                                Spacer(Modifier.weight(1f))
-                                Row(
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    AnimatedVisibility(
-                                        visible = route == PlaylistRoute.Overview && showInlineSearch,
-                                        enter = expandHorizontally(
-                                            expandFrom = Alignment.End,
-                                            animationSpec = spring(dampingRatio = 0.82f, stiffness = 520f)
-                                        ) + fadeIn(animationSpec = tween(180)),
-                                        exit = shrinkHorizontally(
-                                            shrinkTowards = Alignment.End,
-                                            animationSpec = spring(dampingRatio = 0.88f, stiffness = 560f)
-                                        ) + fadeOut(animationSpec = tween(140))
-                                    ) {
-                                        LiquidGlassPane(
-                                            enabled = glassy,
-                                            dark = dark,
-                                            shape = RoundedCornerShape(999.dp),
-                                            cornerRadius = 32.dp,
-                                            modifier = Modifier.width(196.dp)
-                                        ) {
-                                            OutlinedTextField(
-                                                value = songSearchQuery,
-                                                onValueChange = onSongSearchQueryChange,
-                                                singleLine = true,
-                                                placeholder = { Text("搜索歌单") },
-                                                leadingIcon = {
-                                                    Icon(Icons.Rounded.Search, contentDescription = null)
-                                                },
-                                                trailingIcon = {
-                                                    Icon(
-                                                        Icons.Rounded.ChevronRight,
-                                                        contentDescription = "收起搜索",
-                                                        modifier = Modifier.noRippleClick(shape = CircleShape) {
-                                                            showInlineSearch = false
-                                                            onSongSearchQueryChange("")
-                                                        }
-                                                    )
-                                                },
-                                                textStyle = MaterialTheme.typography.bodyMedium,
-                                                shape = RoundedCornerShape(999.dp),
-                                                modifier = Modifier.fillMaxWidth()
-                                            )
-                                        }
-                                    }
-                                    if (route == PlaylistRoute.Overview && !showInlineSearch) {
-                                        LiquidGlassPane(
-                                            enabled = glassy,
-                                            dark = dark,
-                                            shape = CircleShape,
-                                            cornerRadius = 26.dp,
-                                            modifier = Modifier.noRippleClick(shape = CircleShape) {
-                                                showInlineSearch = true
-                                            }
-                                        ) {
-                                            Box(
-                                                modifier = Modifier.padding(10.dp),
-                                                contentAlignment = Alignment.Center
-                                            ) {
-                                                Icon(
-                                                    Icons.Rounded.Search,
-                                                    contentDescription = "展开搜索",
-                                                    tint = if (dark) Color.White else Color(0xFF111111)
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            Spacer(Modifier.height(46.dp))
                             Spacer(Modifier.weight(1f))
                             Row(verticalAlignment = Alignment.Bottom) {
                                 AsyncImage(
@@ -467,10 +399,10 @@ fun PlaylistDetailScreen(
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         PlaylistHeaderBadge(
-                                            text = if (route == PlaylistRoute.Comments) "评论区" else "歌单详情"
+                                            text = if (displayRoute == PlaylistRoute.Comments) "评论区" else "歌单详情"
                                         )
                                         PlaylistHeaderBadge(text = "${playlist.songs.size} 首")
-                                        if (commentCount > 0) {
+                                        if (canShowComments && commentCount > 0) {
                                             PlaylistHeaderBadge(text = "$commentCount 条评论")
                                         }
                                     }
@@ -508,52 +440,66 @@ fun PlaylistDetailScreen(
                                         Spacer(Modifier.width(6.dp))
                                         Text("播放全部")
                                     }
-                                    PlaylistActionChip(
-                                        text = when {
-                                            isSubscriptionLoading -> "处理中"
-                                            isSubscribed -> "已收藏"
-                                            else -> "收藏"
-                                        },
-                                        dark = dark,
-                                        selected = isSubscribed,
-                                        onClick = onToggleSubscription,
-                                        leading = {
-                                            Icon(
-                                                Icons.Rounded.Favorite,
-                                                contentDescription = null,
-                                                tint = if (isSubscribed) Color(0xFFFF5C7C) else titleColor,
-                                                modifier = Modifier.size(18.dp)
-                                            )
-                                        }
-                                    )
-                                    PlaylistActionChip(
-                                        text = if (commentCount > 0) "评论 $commentCount" else "评论",
-                                        dark = dark,
-                                        selected = route == PlaylistRoute.Comments,
-                                        onClick = onShowComments
-                                    )
+                                    if (canShowSubscriptionAction) {
+                                        PlaylistActionChip(
+                                            text = when {
+                                                isSubscriptionLoading -> "处理中"
+                                                isSubscriptionLocked -> "已收藏"
+                                                isSubscribed -> "已收藏"
+                                                else -> "收藏"
+                                            },
+                                            dark = dark,
+                                            selected = isSubscribed || isSubscriptionLocked,
+                                            enabled = !isSubscriptionLoading && !isSubscriptionLocked,
+                                            onClick = {
+                                                if (isSubscribed) {
+                                                    pendingCancelSubscription = true
+                                                } else {
+                                                    onToggleSubscription()
+                                                }
+                                            },
+                                            leading = {
+                                                Icon(
+                                                    Icons.Rounded.Favorite,
+                                                    contentDescription = null,
+                                                    tint = if (isSubscribed || isSubscriptionLocked) Color(0xFFFF5C7C) else titleColor,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                            }
+                                        )
+                                    }
+                                    if (canShowComments) {
+                                        PlaylistActionChip(
+                                            text = if (commentCount > 0) "评论 $commentCount" else "评论",
+                                            dark = dark,
+                                            selected = displayRoute == PlaylistRoute.Comments,
+                                            onClick = onShowComments
+                                        )
+                                    }
                                 }
-                                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                                    PlaylistRouteChip(
-                                        text = "歌曲 ${playlist.songs.size}",
-                                        selected = route == PlaylistRoute.Overview,
-                                        dark = dark,
-                                        modifier = Modifier.weight(1f),
-                                        onClick = onShowSongs
-                                    )
-                                    PlaylistRouteChip(
-                                        text = if (commentCount > 0) "评论 $commentCount" else "评论",
-                                        selected = route == PlaylistRoute.Comments,
-                                        dark = dark,
-                                        modifier = Modifier.weight(1f),
-                                        onClick = onShowComments
-                                    )
+                                if (canShowComments) {
+                                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                                        PlaylistRouteChip(
+                                            text = "歌曲 ${playlist.songs.size}",
+                                            selected = displayRoute == PlaylistRoute.Overview,
+                                            dark = dark,
+                                            modifier = Modifier.weight(1f),
+                                            onClick = onShowSongs
+                                        )
+                                        PlaylistRouteChip(
+                                            text = if (commentCount > 0) "评论 $commentCount" else "评论",
+                                            selected = displayRoute == PlaylistRoute.Comments,
+                                            dark = dark,
+                                            modifier = Modifier.weight(1f),
+                                            onClick = onShowComments
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
                 }
-                if (route == PlaylistRoute.Overview) {
+                if (displayRoute == PlaylistRoute.Overview) {
                     if (isLoading) {
                         item {
                             LoadingStateCard(
@@ -691,7 +637,45 @@ fun PlaylistDetailScreen(
                 onClick = onBack,
                 modifier = Modifier.align(Alignment.TopStart)
             )
+            PlaylistFloatingSearchControl(
+                query = songSearchQuery,
+                expanded = showInlineSearch,
+                dark = dark,
+                glassy = glassy,
+                enabled = playlist.songs.isNotEmpty(),
+                onExpandedChange = { expanded ->
+                    if (expanded && displayRoute != PlaylistRoute.Overview) {
+                        onShowSongs()
+                    }
+                    showInlineSearch = expanded
+                    if (!expanded) onSongSearchQueryChange("")
+                },
+                onQueryChange = onSongSearchQueryChange,
+                modifier = Modifier.align(Alignment.TopEnd)
+            )
         }
+    }
+    if (pendingCancelSubscription) {
+        AlertDialog(
+            onDismissRequest = { pendingCancelSubscription = false },
+            title = { Text("取消收藏歌单？") },
+            text = { Text("取消后，这个歌单会从账号收藏中移除。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        pendingCancelSubscription = false
+                        onToggleSubscription()
+                    }
+                ) {
+                    Text("取消收藏")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingCancelSubscription = false }) {
+                    Text("再想想")
+                }
+            }
+        )
     }
     actionSong?.let { song ->
         SongActionSheetModal(
@@ -1182,13 +1166,22 @@ private fun ArtistHeroCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    Spacer(Modifier.height(24.dp))
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = artist.artistPlatformSummary(),
+                        color = mutedText,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.height(20.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceEvenly
                     ) {
                         ArtistStatBlock("${artist.albumCount.coerceAtLeast(artist.albums.size)}", "专辑", titleColor, mutedText)
-                        ArtistStatBlock("${artist.songCount.coerceAtLeast(artist.songs.size)}", "单曲", titleColor, mutedText)
+                        ArtistStatBlock("${artist.totalArtistSongCount()}", "单曲", titleColor, mutedText)
                         ArtistStatBlock("${artist.mvCount}", "MV", titleColor, mutedText)
                     }
                 }
@@ -1206,6 +1199,16 @@ private fun ArtistHeroCard(
         )
     }
 }
+
+private fun MusicPlaylist.artistPlatformSummary(): String {
+    val count = totalArtistSongCount()
+    return listOfNotNull(
+        count.takeIf { it > 0 }?.let { "$it 首单曲" }
+    ).joinToString(" · ").ifBlank { "歌手" }
+}
+
+private fun MusicPlaylist.totalArtistSongCount(): Int =
+    songCount.coerceAtLeast(songs.size)
 
 @Composable
 private fun ArtistStatBlock(
@@ -1360,15 +1363,28 @@ private fun ArtistAlbumRow(
             modifier = Modifier.padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            AsyncImage(
-                model = album.coverUrl.ifBlank { null },
-                contentDescription = album.title,
-                contentScale = ContentScale.Crop,
+            Box(
                 modifier = Modifier
                     .size(62.dp)
                     .clip(RoundedCornerShape(16.dp))
-                    .background(Color(0xFF252525))
-            )
+                    .background(if (dark) Color(0xFF252525) else Color(0xFFE9EAEE)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Rounded.Album,
+                    contentDescription = null,
+                    tint = if (dark) Color.White.copy(alpha = 0.66f) else Color(0xFF757981),
+                    modifier = Modifier.size(30.dp)
+                )
+                if (album.coverUrl.isNotBlank()) {
+                    AsyncImage(
+                        model = album.coverUrl,
+                        contentDescription = album.title,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+            }
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
                 Text(
@@ -1394,6 +1410,122 @@ private fun ArtistAlbumRow(
                 tint = mutedText,
                 modifier = Modifier.size(24.dp)
             )
+        }
+    }
+}
+
+@Composable
+private fun PlaylistFloatingSearchControl(
+    query: String,
+    expanded: Boolean,
+    dark: Boolean,
+    glassy: Boolean,
+    enabled: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+    onQueryChange: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val controlWidth by animateDpAsState(
+        targetValue = if (expanded) 248.dp else 48.dp,
+        animationSpec = spring(dampingRatio = 0.82f, stiffness = 520f),
+        label = "playlist-search-width"
+    )
+    val fieldAlpha by animateFloatAsState(
+        targetValue = if (expanded) 1f else 0f,
+        animationSpec = tween(durationMillis = if (expanded) 180 else 90),
+        label = "playlist-search-field-alpha"
+    )
+    val iconTint = if (dark) Color.White else Color(0xFF111111)
+    val containerColor = if (dark) Color(0xF0222528) else Color.White.copy(alpha = 0.96f)
+    val borderColor = if (dark) Color.White.copy(alpha = 0.18f) else Color.Black.copy(alpha = 0.10f)
+    val disabledAlpha = if (enabled) 1f else 0.42f
+
+    Box(
+        modifier = modifier
+            .statusBarsPadding()
+            .padding(end = 18.dp, top = 10.dp)
+            .zIndex(24f),
+        contentAlignment = Alignment.CenterEnd
+    ) {
+        Surface(
+            color = containerColor,
+            border = BorderStroke(1.dp, borderColor),
+            shape = RoundedCornerShape(999.dp),
+            modifier = Modifier
+                .width(controlWidth)
+                .shadow(if (glassy) 10.dp else 4.dp, RoundedCornerShape(999.dp), clip = false)
+                .alpha(disabledAlpha)
+                .then(
+                    if (expanded || !enabled) {
+                        Modifier
+                    } else {
+                        Modifier.noRippleClick(shape = RoundedCornerShape(999.dp)) {
+                            onExpandedChange(true)
+                        }
+                    }
+                )
+        ) {
+            Row(
+                modifier = Modifier
+                    .height(48.dp)
+                    .padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Rounded.Search,
+                    contentDescription = "搜索当前歌单",
+                    tint = iconTint,
+                    modifier = Modifier.size(22.dp)
+                )
+                if (expanded) {
+                    Spacer(Modifier.width(8.dp))
+                    BasicTextField(
+                        value = query,
+                        onValueChange = onQueryChange,
+                        singleLine = true,
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(
+                            color = iconTint,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 16.sp
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .alpha(fieldAlpha),
+                        decorationBox = { innerTextField ->
+                            Box(
+                                modifier = Modifier.fillMaxWidth(),
+                                contentAlignment = Alignment.CenterStart
+                            ) {
+                                if (query.isBlank()) {
+                                    Text(
+                                        text = "搜索歌单",
+                                        color = iconTint.copy(alpha = 0.46f),
+                                        style = MaterialTheme.typography.bodyMedium.copy(
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontSize = 16.sp
+                                        ),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                innerTextField()
+                            }
+                        }
+                    )
+                    Icon(
+                        Icons.Rounded.ChevronRight,
+                        contentDescription = "收起搜索",
+                        tint = iconTint.copy(alpha = 0.72f),
+                        modifier = Modifier
+                            .size(32.dp)
+                            .noRippleClick(shape = CircleShape) {
+                                onExpandedChange(false)
+                            }
+                            .padding(5.dp)
+                    )
+                }
+            }
         }
     }
 }
@@ -1439,6 +1571,7 @@ fun PlaylistActionChip(
     dark: Boolean,
     selected: Boolean,
     onClick: () -> Unit,
+    enabled: Boolean = true,
     leading: @Composable (() -> Unit)? = null
 ) {
     val container = when {
@@ -1455,7 +1588,11 @@ fun PlaylistActionChip(
         color = container,
         border = BorderStroke(1.dp, border),
         shape = RoundedCornerShape(999.dp),
-        modifier = Modifier.noRippleClick(shape = RoundedCornerShape(999.dp), onClick = onClick)
+        modifier = if (enabled) {
+            Modifier.noRippleClick(shape = RoundedCornerShape(999.dp), onClick = onClick)
+        } else {
+            Modifier.alpha(0.56f)
+        }
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp),

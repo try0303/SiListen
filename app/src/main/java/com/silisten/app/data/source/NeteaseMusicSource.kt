@@ -25,11 +25,11 @@ import org.json.JSONObject
 class NeteaseMusicSource(
     private val apiClient: NeteaseApiClient,
     private val qualityProvider: () -> PlaybackQuality = { PlaybackQuality.ExHigh }
-) : MusicSource, PagedMusicSearchSource, SongCommentSource {
+) : MusicSource, PagedMusicSearchSource, CollectionSearchSource, CollectionDetailSource, SongCommentSource {
     override val info = MusicSourceInfo(
         id = "netease",
-        name = "网易云音乐",
-        description = "默认音源。优先直接连接网易云音乐，网络不稳定时会自动尝试备用方式。",
+        name = "云翼曲库",
+        description = "默认账号曲库。优先直连账号服务，网络不稳定时会自动尝试备用方式。",
         badge = "默认",
         accentHex = 0xFF1ED760
     )
@@ -39,6 +39,11 @@ class NeteaseMusicSource(
     private val lyricCache = ConcurrentHashMap<String, CachedLyrics>()
     private val playlistCache = ConcurrentHashMap<String, CachedPlaylist>()
     private val playlistListCache = ConcurrentHashMap<String, CachedPlaylistList>()
+
+    fun clearLibraryCache() {
+        playlistCache.clear()
+        playlistListCache.clear()
+    }
 
     override suspend fun featured(): List<MusicPlaylist> {
         playlistListCache["featured"]?.takeIf { it.expiresAt > System.currentTimeMillis() }?.items?.let { return it }
@@ -128,13 +133,17 @@ class NeteaseMusicSource(
             val json = apiClient.getJson(
                 "/user/playlist?uid=$userId&limit=40&timestamp=${System.currentTimeMillis()}"
             )
-            json.optJSONArray("playlist").orEmpty().toPlaylistShells(40, PlaylistKind.UserPlaylist)
+            json.optJSONArray("playlist").orEmpty().toPlaylistShells(
+                limit = 40,
+                kind = PlaylistKind.UserPlaylist,
+                accountUserId = userId
+            )
         }.getOrDefault(emptyList()).also {
             playlistListCache[cacheKey] = CachedPlaylistList(it, System.currentTimeMillis() + 2 * 60 * 1000)
         }
     }
 
-    suspend fun playlistDetail(playlist: MusicPlaylist): MusicPlaylist = withContext(Dispatchers.IO) {
+    override suspend fun playlistDetail(playlist: MusicPlaylist): MusicPlaylist = withContext(Dispatchers.IO) {
         playlistCache[playlist.id]?.takeIf { it.expiresAt > System.currentTimeMillis() }?.item?.let {
             return@withContext it
         }
@@ -223,10 +232,10 @@ class NeteaseMusicSource(
         )
     }
 
-    suspend fun artistSongs(
+    override suspend fun artistSongs(
         artist: MusicPlaylist,
-        limit: Int = 50,
-        offset: Int = 0
+        limit: Int,
+        offset: Int
     ): List<Song> = withContext(Dispatchers.IO) {
         val numericId = extractPlaylistNumericId(artist)
         val safeLimit = limit.coerceIn(1, 50)
@@ -433,10 +442,10 @@ class NeteaseMusicSource(
         songs
     }
 
-    suspend fun searchPlaylists(
+    override suspend fun searchPlaylists(
         keyword: String,
-        limit: Int = 20,
-        offset: Int = 0
+        limit: Int,
+        offset: Int
     ): List<MusicPlaylist> = withContext(Dispatchers.IO) {
         searchCollectionShells(
             keyword = keyword,
@@ -452,10 +461,10 @@ class NeteaseMusicSource(
         }
     }
 
-    suspend fun searchAlbums(
+    override suspend fun searchAlbums(
         keyword: String,
-        limit: Int = 20,
-        offset: Int = 0
+        limit: Int,
+        offset: Int
     ): List<MusicPlaylist> = withContext(Dispatchers.IO) {
         searchCollectionShells(
             keyword = keyword,
@@ -471,10 +480,10 @@ class NeteaseMusicSource(
         }
     }
 
-    suspend fun searchArtists(
+    override suspend fun searchArtists(
         keyword: String,
-        limit: Int = 20,
-        offset: Int = 0
+        limit: Int,
+        offset: Int
     ): List<MusicPlaylist> = withContext(Dispatchers.IO) {
         searchCollectionShells(
             keyword = keyword,
@@ -689,7 +698,11 @@ class NeteaseMusicSource(
         }
     }
 
-    private fun JSONArray.toPlaylistShells(limit: Int, kind: PlaylistKind = PlaylistKind.Playlist): List<MusicPlaylist> {
+    private fun JSONArray.toPlaylistShells(
+        limit: Int,
+        kind: PlaylistKind = PlaylistKind.Playlist,
+        accountUserId: Long = 0L
+    ): List<MusicPlaylist> {
         return buildList {
             for (index in 0 until length().coerceAtMost(limit)) {
                 val item = optJSONObject(index) ?: continue
@@ -697,6 +710,12 @@ class NeteaseMusicSource(
                     .ifBlank { item.optString("playlistId") }
                     .ifBlank { item.optString("resourceId") }
                 if (id.isBlank()) continue
+                val creatorUserId = item.optJSONObject("creator")?.optLong("userId", 0L)
+                    ?: item.optLong("userId", 0L)
+                val subscribed = item.optBoolean(
+                    "subscribed",
+                    accountUserId > 0L && creatorUserId > 0L && creatorUserId != accountUserId
+                )
                 add(
                     MusicPlaylist(
                         id = "netease-playlist-$id",
@@ -712,7 +731,9 @@ class NeteaseMusicSource(
                             .ifBlank { item.optString("coverImgUrl").cleanText() }
                             .ifBlank { defaultCover },
                         songs = emptyList(),
-                        kind = kind
+                        kind = kind,
+                        creatorUserId = creatorUserId,
+                        subscribed = subscribed
                     )
                 )
             }

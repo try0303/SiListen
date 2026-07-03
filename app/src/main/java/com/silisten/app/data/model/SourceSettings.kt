@@ -21,11 +21,11 @@ data class SourcePlatformOption(
 )
 
 val BuiltInSearchPlatforms = listOf(
-    SourcePlatformOption(SourcePlatformIds.NETEASE, "wy", "网易云音乐", "网易云曲库、歌单、专辑、歌手与账号体系"),
-    SourcePlatformOption(SourcePlatformIds.KUWO, "kw", "酷我音乐", "LX 同款酷我 musicSearch / comment 模块"),
-    SourcePlatformOption(SourcePlatformIds.KUGOU, "kg", "酷狗音乐", "LX 同款酷狗 musicSearch / comment 模块"),
-    SourcePlatformOption(SourcePlatformIds.QQ, "tx", "QQ 音乐", "QQ 搜索与评论模块，播放仍交给自定义音源解析"),
-    SourcePlatformOption(SourcePlatformIds.MIGU, "mg", "咪咕音乐", "LX 同款咪咕 musicSearch / comment 模块")
+    SourcePlatformOption(SourcePlatformIds.NETEASE, "wy", "云翼曲库", "账号歌单、收藏和评论能力"),
+    SourcePlatformOption(SourcePlatformIds.KUWO, "kw", "酷窝曲库", "内置搜索与评论模块"),
+    SourcePlatformOption(SourcePlatformIds.KUGOU, "kg", "酷构曲库", "内置搜索与评论模块"),
+    SourcePlatformOption(SourcePlatformIds.QQ, "tx", "轻雀曲库", "内置搜索与评论模块"),
+    SourcePlatformOption(SourcePlatformIds.MIGU, "mg", "米谷曲库", "内置搜索与评论模块")
 )
 
 val BuiltInCommentPlatforms = BuiltInSearchPlatforms

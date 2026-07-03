@@ -1,4 +1,4 @@
-﻿package com.silisten.app.ui
+package com.silisten.app.ui
 
 import android.Manifest
 import android.content.ContentValues
@@ -257,11 +257,34 @@ fun Modifier.noRippleClick(
     shape: Shape = RoundedCornerShape(20.dp),
     onClick: () -> Unit
 ): Modifier = composed {
-    clip(shape).clickable(
-        interactionSource = remember { MutableInteractionSource() },
-        indication = null,
-        onClick = onClick
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val pressedScale by animateFloatAsState(
+        targetValue = if (pressed) 0.985f else 1f,
+        animationSpec = spring(dampingRatio = 0.78f, stiffness = 620f),
+        label = "no-ripple-press-scale"
     )
+    val pressedOverlayAlpha by animateFloatAsState(
+        targetValue = if (pressed) 0.08f else 0f,
+        animationSpec = tween(durationMillis = if (pressed) 70 else 150),
+        label = "no-ripple-press-overlay"
+    )
+    graphicsLayer {
+        scaleX = pressedScale
+        scaleY = pressedScale
+    }
+        .clip(shape)
+        .drawWithContent {
+            drawContent()
+            if (pressedOverlayAlpha > 0f) {
+                drawRect(Color.Black.copy(alpha = pressedOverlayAlpha))
+            }
+        }
+        .clickable(
+            interactionSource = interactionSource,
+            indication = null,
+            onClick = onClick
+        )
 }
 
 @Composable

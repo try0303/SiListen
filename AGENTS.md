@@ -37,8 +37,9 @@ app/src/main/java/com/silisten/app/
 │   │   ├── MusicSource.kt              # 统一音源接口
 │   │   ├── MusicSourceRegistry.kt      # 音源注册表
 │   │   ├── NeteaseMusicSource.kt       # 网易云音源（搜索/播放/歌词/歌单/评论/红心）
-│   │   ├── NeteaseApiClient.kt         # 上层封装（直连优先+网关回退+登录）
+│   │   ├── NeteaseApiClient.kt         # 上层封装（端内直连+登录状态）
 │   │   ├── NeteaseDirectApiClient.kt   # 端内直连 music.163.com（WeAPI 加密）
+│   │   ├── LxPlatformMusicSource.kt    # 参考 LX Music 多平台搜索/歌单/专辑/歌手能力
 │   │   ├── DemoMusicSource.kt          # 公开示例音源
 │   │   └── LocalMusicSource.kt         # 本地 MediaStore 音源
 │   └── repository/
@@ -73,9 +74,15 @@ app/src/main/java/com/silisten/app/
 
 ### 网易云直连
 - `NeteaseDirectApiClient` 自实现 `NeteaseCrypto.weApi()` 和 `eApi()` 加密
-- 请求优先走直连 `music.163.com`，失败回退到本地 NeteaseCloudMusicApi 网关
+- 请求走端内直连 `music.163.com`，不再依赖任何本地网关服务
 - Cookie 通过 `PersistentCookieJar` 存储在 SharedPreferences
 - 设备指纹 cookies 在 `NeteaseDirectApiClient.init` 时自动注入
+
+### 音源与开源参考
+- 自定义源能力兼容 LX 自定义源协议，用户可导入可信脚本源用于播放地址解析
+- 多平台搜索、歌单、专辑、歌手与部分歌词/封面处理参考了 `lyswhut/lx-music-mobile` 的开源项目思路
+- 使用或参考 LX 相关开源实现时，必须在文档、设置页说明或发布说明中保留来源声明，不得把第三方开源成果包装成项目原创
+- 自定义源仅用于用户自行配置的播放解析能力，界面文案必须强调可信来源与版权合规
 
 ### 播放器
 - `PlayerController.playQueue()` 先解析首曲 streamUrl 并立即播放，然后并发解析后续 24 首
@@ -146,6 +153,6 @@ app/src/main/java/com/silisten/app/
 ## 参考资料
 
 - `.reference/bujuan/` — Flutter 网易云播放器参考（bujuan_music_api 在 GitHub: 2697a/bujuan_music_api）
+- `.reference/lx-music-mobile-main/` — LX Music Mobile 开源项目参考（GitHub: lyswhut/lx-music-mobile）
 - `.reference/Mineradio/` — Electron 音乐播放器参考
 - `.reference/KernelSU/` — 液态玻璃 UI 组件参考
-- `.services/api-enhanced/` — NeteaseCloudMusicApi Enhanced（Node.js 网关，调试备用）
