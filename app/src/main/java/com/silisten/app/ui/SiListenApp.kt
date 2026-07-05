@@ -443,6 +443,7 @@ fun SiListenApp(viewModel: SiListenViewModel) {
     BackHandler(
         enabled = isSearchPageVisible || isSearchDockExpanded
     ) {
+        viewModel.closeSearchPage()
         returnToSearchOrigin = null
         val origin = searchChromeState.originOrNull() ?: currentMainTab
         searchChromeState = SearchChromeState.Closed
@@ -617,6 +618,9 @@ fun SiListenApp(viewModel: SiListenViewModel) {
                         selected = bottomSelectedTab,
                         selectedPosition = if (uiState.settingsRoute == SettingsRoute.Main) pagerPosition else null,
                         onSelect = { tab ->
+                            if (isSearchPageVisible || isSearchDockExpanded) {
+                                viewModel.closeSearchPage()
+                            }
                             searchChromeState = SearchChromeState.Closed
                             returnToSearchOrigin = null
                             currentMainTab = tab
@@ -689,6 +693,7 @@ fun SiListenApp(viewModel: SiListenViewModel) {
                         selected = bottomSelectedTab,
                         selectedPosition = if (uiState.settingsRoute == SettingsRoute.Main) pagerPosition else null,
                         onSelect = { tab ->
+                            viewModel.closeSearchPage()
                             searchChromeState = SearchChromeState.Closed
                             returnToSearchOrigin = null
                             currentMainTab = tab
@@ -757,6 +762,7 @@ fun SiListenApp(viewModel: SiListenViewModel) {
                         onSeek = viewModel::seekTo,
                         onRefreshLyrics = viewModel::refreshCurrentLyrics,
                         onToggleLike = viewModel::toggleSongLike,
+                        onArtistClick = viewModel::openArtistFromSong,
                         onPlaybackModeChange = viewModel::selectPlaybackMode,
                         onStartSleepTimer = viewModel::startSleepTimer,
                         onCancelSleepTimer = { viewModel.cancelSleepTimer() },

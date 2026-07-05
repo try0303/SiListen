@@ -1,5 +1,6 @@
 package com.silisten.app.ui.theme
 
+import android.graphics.Color as AndroidColor
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
@@ -12,10 +13,13 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
 import com.silisten.app.ThemeAccentOption
+import com.silisten.app.ThemeColorSpecOption
 import com.silisten.app.ThemeModeOption
+import com.silisten.app.ThemePaletteStyleOption
 import com.silisten.app.ThemeSettingsState
 import com.silisten.app.ThemeUiModeOption
 
@@ -27,6 +31,15 @@ data class SiListenAppearance(
     val floatingBottomBarBlurEnabled: Boolean,
     val predictiveBackEnabled: Boolean,
     val accent: Color
+)
+
+private data class SiListenPalette(
+    val primary: Color,
+    val secondary: Color,
+    val tertiary: Color,
+    val background: Color,
+    val surface: Color,
+    val surfaceContainer: Color
 )
 
 val LocalSiListenAppearance = staticCompositionLocalOf {
@@ -47,9 +60,11 @@ fun SiListenTheme(
     content: @Composable () -> Unit
 ) {
     val darkTheme = themeSettings.resolveDarkTheme()
-    val accent = themeSettings.accentColor()
-    val appearance = remember(themeSettings, darkTheme) {
-        themeSettings.toAppearance(darkTheme)
+    val palette = remember(themeSettings, darkTheme) {
+        themeSettings.toPalette(darkTheme)
+    }
+    val appearance = remember(themeSettings, darkTheme, palette.primary) {
+        themeSettings.toAppearance(darkTheme, palette.primary)
     }
     val currentDensity = LocalDensity.current
     val scaledDensity = remember(currentDensity, themeSettings.uiScale) {
@@ -60,25 +75,25 @@ fun SiListenTheme(
     }
     val scheme = if (darkTheme) {
         darkColorScheme(
-            primary = accent,
-            secondary = Color(0xFFFFC857),
-            tertiary = Color(0xFF8BD3FF),
-            background = if (themeSettings.uiMode == ThemeUiModeOption.Miuix) Color(0xFF050505) else Color(0xFF101114),
-            surface = if (themeSettings.uiMode == ThemeUiModeOption.Miuix) Color(0xFF0F0F0F) else Color(0xFF1B1C20),
-            surfaceContainer = if (themeSettings.uiMode == ThemeUiModeOption.Miuix) Color(0xFF1C1C1E) else Color(0xFF25262A),
-            onPrimary = themeSettings.onAccentColor(),
+            primary = palette.primary,
+            secondary = palette.secondary,
+            tertiary = palette.tertiary,
+            background = palette.background,
+            surface = palette.surface,
+            surfaceContainer = palette.surfaceContainer,
+            onPrimary = onColorFor(palette.primary),
             onBackground = Color.White,
             onSurface = Color.White
         )
     } else {
         lightColorScheme(
-            primary = accent,
-            secondary = Color(0xFFFFC857),
-            tertiary = Color(0xFF006D77),
-            background = if (themeSettings.uiMode == ThemeUiModeOption.Miuix) Color(0xFFF7F7F9) else Color(0xFFFDFBFF),
-            surface = if (themeSettings.uiMode == ThemeUiModeOption.Miuix) Color(0xFFFDFDFE) else Color(0xFFFFFBFE),
-            surfaceContainer = if (themeSettings.uiMode == ThemeUiModeOption.Miuix) Color(0xFFF0F0F3) else Color(0xFFF3EDF7),
-            onPrimary = themeSettings.onAccentColor(),
+            primary = palette.primary,
+            secondary = palette.secondary,
+            tertiary = palette.tertiary,
+            background = palette.background,
+            surface = palette.surface,
+            surfaceContainer = palette.surfaceContainer,
+            onPrimary = onColorFor(palette.primary),
             onBackground = Color(0xFF111111),
             onSurface = Color(0xFF111111)
         )
@@ -91,7 +106,7 @@ fun SiListenTheme(
     }
 }
 
-fun ThemeSettingsState.toAppearance(darkTheme: Boolean): SiListenAppearance =
+fun ThemeSettingsState.toAppearance(darkTheme: Boolean, accent: Color = accentColor()): SiListenAppearance =
     SiListenAppearance(
         uiMode = uiMode,
         dark = darkTheme,
@@ -99,7 +114,7 @@ fun ThemeSettingsState.toAppearance(darkTheme: Boolean): SiListenAppearance =
         floatingBottomBarEnabled = floatingBottomBarEnabled,
         floatingBottomBarBlurEnabled = floatingBottomBarBlurEnabled,
         predictiveBackEnabled = predictiveBackEnabled,
-        accent = accentColor()
+        accent = accent
     )
 
 @Composable
@@ -121,33 +136,121 @@ fun ThemeSettingsState.accentColor(): Color {
 }
 
 fun ThemeSettingsState.onAccentColor(): Color {
-    return if (accentColor().luminance() > 0.58f) {
+    return onColorFor(accentColor())
+}
+
+fun appBackgroundBrush(themeSettings: ThemeSettingsState, darkTheme: Boolean): Brush {
+    val palette = themeSettings.toPalette(darkTheme)
+    return if (darkTheme) {
+        Brush.verticalGradient(
+            listOf(
+                palette.background,
+                palette.primary.copy(alpha = 0.18f),
+                palette.tertiary.copy(alpha = 0.10f).compositeOver(palette.surface),
+                palette.background
+            )
+        )
+    } else {
+        val accentWash = palette.primary.copy(alpha = if (themeSettings.monetEnabled) 0.18f else 0.12f)
+        Brush.verticalGradient(
+            listOf(
+                palette.background,
+                accentWash.compositeOver(palette.background),
+                palette.surfaceContainer,
+                palette.background
+            )
+        )
+    }
+}
+
+private fun ThemeSettingsState.toPalette(darkTheme: Boolean): SiListenPalette {
+    val base = accentColor()
+    val primary = when (paletteStyle) {
+        ThemePaletteStyleOption.TonalSpot -> base.shiftColor(saturation = 0.82f, value = if (darkTheme) 1.08f else 0.95f)
+        ThemePaletteStyleOption.Vibrant -> base.shiftColor(saturation = 1.32f, value = 1.08f)
+        ThemePaletteStyleOption.Expressive -> base.shiftColor(hue = 28f, saturation = 1.18f, value = 1.04f)
+        ThemePaletteStyleOption.Fidelity -> base
+        ThemePaletteStyleOption.Content -> base.shiftColor(hue = -18f, saturation = 1.05f, value = if (darkTheme) 1.10f else 0.98f)
+        ThemePaletteStyleOption.Monochrome -> if (darkTheme) Color(0xFFE7E7EA) else Color(0xFF202124)
+    }
+    val secondary = when (paletteStyle) {
+        ThemePaletteStyleOption.TonalSpot -> base.shiftColor(hue = 42f, saturation = 0.74f, value = 1.03f)
+        ThemePaletteStyleOption.Vibrant -> base.shiftColor(hue = 52f, saturation = 1.22f, value = 1.12f)
+        ThemePaletteStyleOption.Expressive -> base.shiftColor(hue = 118f, saturation = 1.05f, value = 1.05f)
+        ThemePaletteStyleOption.Fidelity -> base.shiftColor(hue = 18f, saturation = 0.92f, value = 1.02f)
+        ThemePaletteStyleOption.Content -> base.shiftColor(hue = -64f, saturation = 0.96f, value = 1.04f)
+        ThemePaletteStyleOption.Monochrome -> if (darkTheme) Color(0xFFBFC2C7) else Color(0xFF6E7278)
+    }
+    val tertiary = when (paletteStyle) {
+        ThemePaletteStyleOption.TonalSpot -> base.shiftColor(hue = -46f, saturation = 0.72f, value = 1.08f)
+        ThemePaletteStyleOption.Vibrant -> base.shiftColor(hue = -92f, saturation = 1.16f, value = 1.10f)
+        ThemePaletteStyleOption.Expressive -> base.shiftColor(hue = -128f, saturation = 1.12f, value = 1.08f)
+        ThemePaletteStyleOption.Fidelity -> base.shiftColor(hue = -22f, saturation = 0.88f, value = 1.04f)
+        ThemePaletteStyleOption.Content -> base.shiftColor(hue = 76f, saturation = 0.98f, value = 1.03f)
+        ThemePaletteStyleOption.Monochrome -> if (darkTheme) Color(0xFF92969C) else Color(0xFF8E939A)
+    }
+    val uiMiuix = uiMode == ThemeUiModeOption.Miuix
+    val background = when {
+        darkTheme && colorSpec == ThemeColorSpecOption.Spec2025 -> Color(0xFF020403)
+        darkTheme && colorSpec == ThemeColorSpecOption.Spec2021 -> Color(0xFF111311)
+        darkTheme && uiMiuix -> Color(0xFF050505)
+        darkTheme -> Color(0xFF101114)
+        !darkTheme && colorSpec == ThemeColorSpecOption.Spec2025 -> primary.copy(alpha = 0.08f).compositeOver(Color(0xFFFFFFFF))
+        !darkTheme && colorSpec == ThemeColorSpecOption.Spec2021 -> primary.copy(alpha = 0.05f).compositeOver(Color(0xFFFBFAF7))
+        uiMiuix -> Color(0xFFF7F7F9)
+        else -> Color(0xFFFDFBFF)
+    }
+    val surface = when {
+        darkTheme && colorSpec == ThemeColorSpecOption.Spec2025 -> primary.copy(alpha = 0.10f).compositeOver(Color(0xFF090B0A))
+        darkTheme && colorSpec == ThemeColorSpecOption.Spec2021 -> Color(0xFF171A17)
+        darkTheme && uiMiuix -> Color(0xFF0F0F0F)
+        darkTheme -> Color(0xFF1B1C20)
+        !darkTheme && colorSpec == ThemeColorSpecOption.Spec2025 -> primary.copy(alpha = 0.05f).compositeOver(Color.White)
+        !darkTheme && colorSpec == ThemeColorSpecOption.Spec2021 -> Color(0xFFFFFCF7)
+        uiMiuix -> Color(0xFFFDFDFE)
+        else -> Color(0xFFFFFBFE)
+    }
+    val surfaceContainer = when {
+        darkTheme && colorSpec == ThemeColorSpecOption.Spec2025 -> primary.copy(alpha = 0.16f).compositeOver(Color(0xFF111311))
+        darkTheme && colorSpec == ThemeColorSpecOption.Spec2021 -> Color(0xFF242721)
+        darkTheme && uiMiuix -> Color(0xFF1C1C1E)
+        darkTheme -> Color(0xFF25262A)
+        !darkTheme && colorSpec == ThemeColorSpecOption.Spec2025 -> primary.copy(alpha = 0.11f).compositeOver(Color.White)
+        !darkTheme && colorSpec == ThemeColorSpecOption.Spec2021 -> primary.copy(alpha = 0.07f).compositeOver(Color(0xFFFFFCF7))
+        uiMiuix -> Color(0xFFF0F0F3)
+        else -> Color(0xFFF3EDF7)
+    }
+    return SiListenPalette(
+        primary = primary,
+        secondary = secondary,
+        tertiary = tertiary,
+        background = background,
+        surface = surface,
+        surfaceContainer = surfaceContainer
+    )
+}
+
+private fun Color.shiftColor(
+    hue: Float = 0f,
+    saturation: Float = 1f,
+    value: Float = 1f
+): Color {
+    val hsv = FloatArray(3)
+    AndroidColor.colorToHSV(toArgb(), hsv)
+    hsv[0] = (hsv[0] + hue).floorMod360()
+    hsv[1] = (hsv[1] * saturation).coerceIn(0f, 1f)
+    hsv[2] = (hsv[2] * value).coerceIn(0f, 1f)
+    return Color(AndroidColor.HSVToColor((alpha * 255f).toInt().coerceIn(0, 255), hsv))
+}
+
+private fun Float.floorMod360(): Float {
+    val mod = this % 360f
+    return if (mod < 0f) mod + 360f else mod
+}
+
+private fun onColorFor(color: Color): Color =
+    if (color.luminance() > 0.58f) {
         Color(0xFF081109)
     } else {
         Color.White
     }
-}
-
-fun appBackgroundBrush(themeSettings: ThemeSettingsState, darkTheme: Boolean): Brush {
-    return if (darkTheme) {
-        val accent = themeSettings.accentColor()
-        Brush.verticalGradient(
-            listOf(
-                Color(0xFF050505),
-                accent.copy(alpha = 0.18f),
-                accent.copy(alpha = 0.10f).compositeOver(Color(0xFF111216)),
-                Color(0xFF050505)
-            )
-        )
-    } else {
-        val accentWash = themeSettings.accentColor().copy(alpha = if (themeSettings.monetEnabled) 0.18f else 0.12f)
-        Brush.verticalGradient(
-            listOf(
-                Color(0xFFFFFFFF),
-                accentWash.compositeOver(Color.White),
-                Color(0xFFF5F6F8),
-                Color(0xFFFFFFFF)
-            )
-        )
-    }
-}

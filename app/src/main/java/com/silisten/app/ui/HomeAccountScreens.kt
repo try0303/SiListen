@@ -84,6 +84,7 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.Icons
@@ -92,6 +93,7 @@ import androidx.compose.material.icons.rounded.Album
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Cloud
+import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.LibraryMusic
@@ -175,9 +177,12 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.composed
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
@@ -357,20 +362,32 @@ fun HomeScreen(
                     )
                 }
             }
-            item {
-                SectionTitle("今日播放", dark = dark)
-            }
             val songs = uiState.dailyDiscovery?.songs?.ifEmpty { null }
-                ?: uiState.featured.firstOrNull()?.songs.orEmpty()
-            items(songs) { song ->
-                SongRow(
-                    song = song,
-                    liked = viewModel.isSongLiked(song),
-                    likeLoading = viewModel.isSongLikeLoading(song),
-                    onClick = { viewModel.playSong(song) },
-                    onLikeClick = if (song.sourceId != "local") ({ viewModel.toggleSongLike(song) }) else null,
-                    onMoreClick = { actionSong = song }
-                )
+                ?: uiState.featured.firstOrNull()?.songs?.ifEmpty { null }
+                ?: uiState.recentPlayedSongs
+            if (songs.isNotEmpty()) {
+                item {
+                    SectionTitle(
+                        if (uiState.dailyDiscovery?.songs?.isNotEmpty() == true ||
+                            uiState.featured.firstOrNull()?.songs?.isNotEmpty() == true
+                        ) {
+                            "今日播放"
+                        } else {
+                            "最近播放"
+                        },
+                        dark = dark
+                    )
+                }
+                items(songs) { song ->
+                    SongRow(
+                        song = song,
+                        liked = viewModel.isSongLiked(song),
+                        likeLoading = viewModel.isSongLikeLoading(song),
+                        onClick = { viewModel.playSong(song) },
+                        onLikeClick = if (song.sourceId != "local") ({ viewModel.toggleSongLike(song) }) else null,
+                        onMoreClick = { actionSong = song }
+                    )
+                }
             }
         }
 
@@ -474,8 +491,17 @@ fun SearchScreen(
         SearchResultTab.Albums -> albumResults.size
         SearchResultTab.Artists -> artistResults.size
     }
-    val openPlaylistFromSearch = onOpenPlaylist ?: { playlist: MusicPlaylist ->
+    val closeSearchPage: () -> Unit = {
+        viewModel.closeSearchPage()
         onClose?.invoke()
+    }
+    val openPlaylistFromSearch = onOpenPlaylist?.let { open ->
+        { playlist: MusicPlaylist ->
+            viewModel.closeSearchPage()
+            open(playlist)
+        }
+    } ?: { playlist: MusicPlaylist ->
+        closeSearchPage()
         viewModel.openPlaylist(playlist)
     }
     LaunchedEffect(autoFocus) {
@@ -571,7 +597,7 @@ fun SearchScreen(
                         }
                     }
                     if (isDismissDrag && dismissDragOffsetPx >= dismissThresholdPx) {
-                        onClose?.invoke()
+                        closeSearchPage()
                     }
                     dismissDragOffsetPx = 0f
                 }
@@ -580,19 +606,26 @@ fun SearchScreen(
     ) {
         SearchPageHeader(
             dark = dark,
-            onClose = onClose
+            onClose = if (onClose != null) closeSearchPage else null
         )
         Spacer(Modifier.height(16.dp))
         IosSearchField(
             value = uiState.searchQuery,
             onValueChange = viewModel::updateSearchQuery,
+            onSearch = viewModel::submitCurrentSearch,
             dark = dark,
             loading = uiState.isSearching,
             modifier = Modifier.focusRequester(searchFocusRequester)
         )
         Spacer(Modifier.height(16.dp))
         if (query.isBlank() && !hasAnyResults) {
-            SearchEmptyHint(dark = dark)
+            SearchHistorySection(
+                history = uiState.searchHistory,
+                dark = dark,
+                onHistoryClick = viewModel::selectSearchHistory,
+                onHistoryLongClick = viewModel::removeSearchHistory,
+                onClearHistory = viewModel::clearSearchHistory
+            )
         } else {
             SearchCategoryTabs(
                 selected = selectedTab,
@@ -727,7 +760,7 @@ fun SearchScreen(
             },
             onShowComments = {
                 actionSong = null
-                onClose?.invoke()
+                closeSearchPage()
                 viewModel.playSongAndOpenComments(song)
             }
         )
@@ -816,12 +849,21 @@ private fun SearchPageHeader(
 private fun IosSearchField(
     value: String,
     onValueChange: (String) -> Unit,
+    onSearch: () -> Unit,
     dark: Boolean,
     loading: Boolean,
     modifier: Modifier = Modifier
 ) {
     val contentColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF151515)
     val mutedText = if (dark) Color.White.copy(alpha = 0.48f) else Color(0xFF7B7D82)
+    var fieldValue by remember {
+        mutableStateOf(TextFieldValue(value, selection = TextRange(value.length)))
+    }
+    LaunchedEffect(value) {
+        if (value != fieldValue.text) {
+            fieldValue = TextFieldValue(value, selection = TextRange(value.length))
+        }
+    }
     Surface(
         color = if (dark) Color.White.copy(alpha = 0.10f) else Color.White.copy(alpha = 0.78f),
         border = BorderStroke(1.dp, if (dark) Color.White.copy(alpha = 0.10f) else Color.White.copy(alpha = 0.92f)),
@@ -832,9 +874,14 @@ private fun IosSearchField(
             .height(62.dp)
     ) {
         BasicTextField(
-            value = value,
-            onValueChange = onValueChange,
+            value = fieldValue,
+            onValueChange = {
+                fieldValue = it
+                onValueChange(it.text)
+            },
             singleLine = true,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = { onSearch() }),
             textStyle = MaterialTheme.typography.titleLarge.copy(
                 color = contentColor,
                 fontWeight = FontWeight.Medium
@@ -1123,19 +1170,91 @@ private fun SearchArtwork(
 }
 
 @Composable
-private fun SearchEmptyHint(dark: Boolean) {
-    val mutedText = if (dark) Color.White.copy(alpha = 0.54f) else Color(0xFF676A70)
-    Surface(
-        color = if (dark) Color.White.copy(alpha = 0.07f) else Color.White.copy(alpha = 0.68f),
-        border = BorderStroke(1.dp, if (dark) Color.White.copy(alpha = 0.08f) else Color.White.copy(alpha = 0.78f)),
-        shape = RoundedCornerShape(26.dp),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Text(
-            text = "输入关键词后，会按单曲、歌单、专辑、歌手分类展示。",
-            color = mutedText,
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.padding(horizontal = 18.dp, vertical = 16.dp)
+private fun SearchHistorySection(
+    history: List<String>,
+    dark: Boolean,
+    onHistoryClick: (String) -> Unit,
+    onHistoryLongClick: (String) -> Unit,
+    onClearHistory: () -> Unit
+) {
+    if (history.isEmpty()) return
+    val titleColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
+    val chipColor = if (dark) Color.White.copy(alpha = 0.07f) else Color.White.copy(alpha = 0.72f)
+    val chipBorder = if (dark) Color.White.copy(alpha = 0.10f) else Color.Black.copy(alpha = 0.07f)
+    var showClearConfirm by remember { mutableStateOf(false) }
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "搜索历史",
+                color = titleColor,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Black,
+                modifier = Modifier.weight(1f)
+            )
+            IconButton(
+                onClick = { showClearConfirm = true },
+                modifier = Modifier
+                    .size(42.dp)
+                    .clip(CircleShape)
+                    .background(if (dark) Color.White.copy(alpha = 0.06f) else Color.Black.copy(alpha = 0.04f))
+            ) {
+                Icon(
+                    Icons.Rounded.Delete,
+                    contentDescription = "清空搜索历史",
+                    tint = if (dark) Color.White.copy(alpha = 0.62f) else Color(0xFF696B70),
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+        }
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            items(history, key = { it }) { keyword ->
+                Surface(
+                    color = chipColor,
+                    border = BorderStroke(1.dp, chipBorder),
+                    shape = RoundedCornerShape(999.dp),
+                    modifier = Modifier.pointerInput(keyword) {
+                        detectTapGestures(
+                            onTap = { onHistoryClick(keyword) },
+                            onLongPress = { onHistoryLongClick(keyword) }
+                        )
+                    }
+                ) {
+                    Text(
+                        text = keyword,
+                        color = if (dark) Color.White.copy(alpha = 0.78f) else Color(0xFF3F4248),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp)
+                    )
+                }
+            }
+        }
+    }
+    if (showClearConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearConfirm = false },
+            title = { Text("清空历史记录？") },
+            text = { Text("确定要清空全部搜索历史记录吗？") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showClearConfirm = false
+                        onClearHistory()
+                    }
+                ) {
+                    Text("清空")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearConfirm = false }) {
+                    Text("取消")
+                }
+            }
         )
     }
 }
@@ -1197,6 +1316,27 @@ fun SourcesScreen(
     val cardColor = if (dark) Color.White.copy(alpha = 0.08f) else Color.White
     val titleColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
     val audioPermission = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO else Manifest.permission.READ_EXTERNAL_STORAGE
+    val recentMusicSongs = remember(uiState.recentPlayedSongs) {
+        uiState.recentPlayedSongs
+            .distinctBy { "${it.sourceId}:${it.id}:${it.streamHint.orEmpty()}" }
+            .take(50)
+    }
+    val recentMusicPlaylist = remember(recentMusicSongs) {
+        recentMusicSongs.takeIf { it.isNotEmpty() }?.let { songs ->
+            MusicPlaylist(
+                id = "local-recent-music",
+                title = "最近音乐",
+                subtitle = "最近播放 · ${songs.size} 首",
+                coverUrl = songs.firstOrNull { it.coverUrl.isNotBlank() }?.coverUrl.orEmpty(),
+                songs = songs,
+                kind = PlaylistKind.Playlist,
+                songCount = songs.size
+            )
+        }
+    }
+    val visibleLocalPlaylists = remember(recentMusicPlaylist, uiState.localPlaylists) {
+        listOfNotNull(recentMusicPlaylist) + uiState.localPlaylists
+    }
     val localPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         viewModel.scanLocalMusic()
     }
@@ -1275,7 +1415,7 @@ fun SourcesScreen(
             ) {
                 Column(Modifier.padding(16.dp)) {
                     LocalPlaylistLibrarySection(
-                        playlists = uiState.localPlaylists,
+                        playlists = visibleLocalPlaylists,
                         dark = dark,
                         onCreate = viewModel::createLocalPlaylist,
                         onOpenPlaylist = viewModel::openPlaylist,
@@ -1527,7 +1667,11 @@ private fun LocalPlaylistLibrarySection(
                     subtitle = playlist.subtitle.ifBlank { "本地歌单 · ${playlist.songs.size} 首" },
                     dark = dark,
                     onClick = { onOpenPlaylist(playlist) },
-                    onLongClick = { pendingDeletePlaylist = playlist }
+                    onLongClick = {
+                        if (playlist.kind == PlaylistKind.LocalPlaylist) {
+                            pendingDeletePlaylist = playlist
+                        }
+                    }
                 )
             }
         }
@@ -1864,6 +2008,14 @@ private fun SmsCodeInput(
     val visibleSlots = if (code.length >= minVisibleSlots) maxCodeLength else minVisibleSlots
     val textColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
     val mutedText = if (dark) Color(0xFF9FA8A0) else Color(0xFF7A7D83)
+    var fieldValue by remember {
+        mutableStateOf(TextFieldValue(code, selection = TextRange(code.length)))
+    }
+    LaunchedEffect(code) {
+        if (code != fieldValue.text) {
+            fieldValue = TextFieldValue(code, selection = TextRange(code.length))
+        }
+    }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
             text = "短信验证码（支持 4-6 位）",
@@ -1872,9 +2024,13 @@ private fun SmsCodeInput(
             fontWeight = FontWeight.SemiBold
         )
         BasicTextField(
-            value = code,
+            value = fieldValue,
             onValueChange = { next ->
-                onValueChange(next.filter { it.isDigit() }.take(maxCodeLength))
+                val sanitized = next.text.filter { it.isDigit() }.take(maxCodeLength)
+                fieldValue = TextFieldValue(sanitized, selection = TextRange(sanitized.length))
+                if (sanitized != code) {
+                    onValueChange(sanitized)
+                }
             },
             singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),

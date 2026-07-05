@@ -1,7 +1,28 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+val releaseSigningPropertiesFile = rootProject.file("release-signing/keystore.properties")
+val releaseSigningProperties = Properties().apply {
+    if (releaseSigningPropertiesFile.exists()) {
+        releaseSigningPropertiesFile.inputStream().use(::load)
+    }
+}
+fun releaseSigningProperty(name: String): String? =
+    releaseSigningProperties.getProperty(name)
+        ?: releaseSigningProperties.getProperty("\uFEFF$name")
+
+val releaseStoreFile = releaseSigningProperty("storeFile")
+    ?.let { rootProject.file(it) }
+    ?.takeIf { it.exists() }
+    ?: rootProject.file("release-signing/silisten-release.jks")
+
+val hasReleaseSigning = releaseStoreFile.exists() &&
+    listOf("storePassword", "keyAlias", "keyPassword")
+        .all { !releaseSigningProperty(it).isNullOrBlank() }
 
 android {
     namespace = "com.silisten.app"
@@ -11,8 +32,28 @@ android {
         applicationId = "com.silisten.app"
         minSdk = 26
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.1"
+    }
+
+    signingConfigs {
+        create("release") {
+            if (hasReleaseSigning) {
+                storeFile = releaseStoreFile
+                storePassword = releaseSigningProperty("storePassword")
+                keyAlias = releaseSigningProperty("keyAlias")
+                keyPassword = releaseSigningProperty("keyPassword")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+            isMinifyEnabled = false
+        }
     }
 
     buildFeatures {

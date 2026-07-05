@@ -213,6 +213,7 @@ import com.kyant.backdrop.shadow.InnerShadow
 import com.kyant.backdrop.shadow.Shadow
 import com.qmdeve.liquidglass.widget.LiquidGlassView
 import com.silisten.app.AppTab
+import com.silisten.app.BuildConfig
 import com.silisten.app.LyricDisplayMode
 import com.silisten.app.PlaybackSettingsState
 import com.silisten.app.PlayerSheetPanel
@@ -253,10 +254,12 @@ import androidx.palette.graphics.Palette
 import coil.ImageLoader
 import coil.request.ImageRequest
 import coil.request.SuccessResult
+import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.android.awaitFrame
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
@@ -264,6 +267,8 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import top.yukonga.miuix.kmp.blur.LayerBackdrop as MiuixLayerBackdrop
 import top.yukonga.miuix.kmp.blur.layerBackdrop as miuixLayerBackdrop
 import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop as rememberMiuixLayerBackdrop
@@ -743,6 +748,36 @@ private fun ThemeSettingsScreen(
     }
 }
 
+private const val UPDATE_MANIFEST_URL =
+    "https://raw.githubusercontent.com/try0303/SiListen/main/update.json"
+
+private data class AppUpdateInfo(
+    val versionCode: Int,
+    val versionName: String,
+    val downloadUrl: String,
+    val releaseUrl: String,
+    val changelog: List<String>
+)
+
+private suspend fun fetchLatestUpdateInfo(): AppUpdateInfo = withContext(Dispatchers.IO) {
+    val json = JSONObject(URL(UPDATE_MANIFEST_URL).readText())
+    val fallbackUrl = "https://github.com/try0303/SiListen/releases/latest"
+    val changelogJson = json.optJSONArray("changelog")
+    val changelog = mutableListOf<String>()
+    if (changelogJson != null) {
+        for (index in 0 until changelogJson.length()) {
+            changelog += changelogJson.optString(index)
+        }
+    }
+    AppUpdateInfo(
+        versionCode = json.optInt("versionCode", BuildConfig.VERSION_CODE),
+        versionName = json.optString("versionName", BuildConfig.VERSION_NAME),
+        downloadUrl = json.optString("downloadUrl", fallbackUrl),
+        releaseUrl = json.optString("releaseUrl", fallbackUrl),
+        changelog = changelog.filter { it.isNotBlank() }
+    )
+}
+
 @Composable
 private fun DonationSettingsScreen(
     themeSettings: ThemeSettingsState,
@@ -758,6 +793,44 @@ private fun DonationSettingsScreen(
         BitmapFactory.decodeResource(context.resources, R.drawable.mm_reward_qrcode)
     }
     val rewardImage = remember(rewardBitmap) { rewardBitmap?.asImageBitmap() }
+    val scope = rememberCoroutineScope()
+    var checkingUpdate by remember { mutableStateOf(false) }
+    var availableUpdate by remember { mutableStateOf<AppUpdateInfo?>(null) }
+
+    availableUpdate?.let { update ->
+        AlertDialog(
+            onDismissRequest = { availableUpdate = null },
+            title = { Text("发现新版本 ${update.versionName}") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("这次更新大概属于：少一点迷路，多一点能听。")
+                    update.changelog.forEach { item ->
+                        Text("• $item", style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val target = update.releaseUrl.ifBlank { update.downloadUrl }
+                        runCatching {
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(target)))
+                        }.onFailure {
+                            Toast.makeText(context, "浏览器好像也在摸鱼，稍后再试。", Toast.LENGTH_SHORT).show()
+                        }
+                        availableUpdate = null
+                    }
+                ) {
+                    Text("去下载")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { availableUpdate = null }) {
+                    Text("稍后")
+                }
+            }
+        )
+    }
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -782,6 +855,63 @@ private fun DonationSettingsScreen(
                 color = mutedColor,
                 style = MaterialTheme.typography.bodyMedium
             )
+        }
+        item {
+            ThemeSettingsGroup(containerColor = panelColor) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = !checkingUpdate) {
+                            scope.launch {
+                                checkingUpdate = true
+                                val result = runCatching { fetchLatestUpdateInfo() }
+                                checkingUpdate = false
+                                result
+                                    .onSuccess { info ->
+                                        if (info.versionCode > BuildConfig.VERSION_CODE) {
+                                            availableUpdate = info
+                                        } else {
+                                            Toast.makeText(
+                                                context,
+                                                "已经是最新版本，APK 暂时不用追着跑。",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
+                                    }
+                                    .onFailure {
+                                        Toast.makeText(
+                                            context,
+                                            "检查更新失败，可能是 GitHub 开小差了。",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                            }
+                        }
+                        .padding(horizontal = 18.dp, vertical = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    ThemeRowMark("UP")
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("检查更新", color = titleColor, fontWeight = FontWeight.Bold)
+                        Text(
+                            "当前版本 v${BuildConfig.VERSION_NAME}，点一下看看有没有新鲜 APK",
+                            color = mutedColor,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    if (checkingUpdate) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp,
+                            color = titleColor
+                        )
+                    } else {
+                        Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = mutedColor)
+                    }
+                }
+            }
         }
         item {
             Surface(

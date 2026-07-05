@@ -47,26 +47,14 @@ class NeteaseMusicSource(
 
     override suspend fun featured(): List<MusicPlaylist> {
         playlistListCache["featured"]?.takeIf { it.expiresAt > System.currentTimeMillis() }?.items?.let { return it }
-        val songs = search("华语流行").take(12).ifEmpty { seedSongs() }
-        return listOf(
-            MusicPlaylist(
-                id = "netease-daily",
-                title = "网易云今日灵感",
-                subtitle = "默认音源推荐",
-                coverUrl = songs.firstOrNull()?.coverUrl.orEmpty(),
-                songs = songs,
-                kind = PlaylistKind.DailyDiscovery
-            ),
-            MusicPlaylist(
-                id = "netease-night",
-                title = "深夜漫游",
-                subtitle = "iOS 质感加一点 Spotify 氛围",
-                coverUrl = songs.getOrNull(1)?.coverUrl ?: songs.firstOrNull()?.coverUrl.orEmpty(),
-                songs = songs.shuffled().take(8),
-                kind = PlaylistKind.Playlist
-            )
-        ).also {
-            playlistListCache["featured"] = CachedPlaylistList(it, System.currentTimeMillis() + 2 * 60 * 1000)
+        val playlists = runCatching {
+            val json = apiClient.getJson("/personalized?limit=12&timestamp=${System.currentTimeMillis()}")
+            json.optJSONArray("result").orEmpty().toPlaylistShells(12)
+        }.getOrDefault(emptyList()).ifEmpty {
+            searchPlaylists("华语流行", limit = 12, offset = 0)
+        }
+        return playlists.also {
+            playlistListCache["featured"] = CachedPlaylistList(it, System.currentTimeMillis() + 10 * 60 * 1000)
         }
     }
 

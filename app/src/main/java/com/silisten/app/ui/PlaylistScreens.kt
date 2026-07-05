@@ -748,6 +748,20 @@ fun ArtistDetailScreen(
     val borderColor = if (dark) Color.White.copy(alpha = 0.11f) else Color.Black.copy(alpha = 0.05f)
     val hotSongs = remember(artist.songs) { artist.songs }
     val artistSongs = if (artistSongsPage.artistId == artist.id) artistSongsPage.songs else emptyList()
+    var showArtistSongSearch by remember(artist.id) { mutableStateOf(false) }
+    var artistSongSearchQuery by remember(artist.id) { mutableStateOf("") }
+    val filteredArtistSongs = remember(artistSongs, artistSongSearchQuery) {
+        val query = artistSongSearchQuery.trim()
+        if (query.isBlank()) {
+            artistSongs
+        } else {
+            artistSongs.filter { song ->
+                song.title.contains(query, ignoreCase = true) ||
+                    song.artist.contains(query, ignoreCase = true) ||
+                    song.album.contains(query, ignoreCase = true)
+            }
+        }
+    }
     val description = artist.description.ifBlank {
         "暂时没有歌手简介。可以先查看热门歌曲和专辑，后续同步到更完整的网易云资料。"
     }
@@ -802,7 +816,15 @@ fun ArtistDetailScreen(
             ArtistDetailTopBar(
                 title = artist.title,
                 dark = dark,
-                onBack = onBack
+                onBack = onBack,
+                showSearch = selectedTab.pageTab == ArtistPageTab.Songs,
+                searchQuery = artistSongSearchQuery,
+                searchExpanded = showArtistSongSearch,
+                onSearchExpandedChange = { expanded ->
+                    showArtistSongSearch = expanded
+                    if (!expanded) artistSongSearchQuery = ""
+                },
+                onSearchQueryChange = { artistSongSearchQuery = it }
             )
             Spacer(Modifier.height(12.dp))
             ArtistDetailTabs(
@@ -955,7 +977,7 @@ fun ArtistDetailScreen(
                                     )
                                 }
                             }
-                            if (!artistSongsPage.isLoading && artistSongs.isEmpty()) {
+                            if (!artistSongsPage.isLoading && filteredArtistSongs.isEmpty()) {
                                 item {
                                     EmptyStateCard(
                                         title = "暂时没有单曲",
@@ -964,7 +986,7 @@ fun ArtistDetailScreen(
                                     )
                                 }
                             }
-                            itemsIndexed(artistSongs, key = { _, song -> song.id }) { index, song ->
+                            itemsIndexed(filteredArtistSongs, key = { _, song -> song.id }) { index, song ->
                                 ArtistSongSurface(
                                     index = index + 1,
                                     song = song,
@@ -1045,7 +1067,12 @@ fun ArtistDetailScreen(
 private fun ArtistDetailTopBar(
     title: String,
     dark: Boolean,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    showSearch: Boolean = false,
+    searchQuery: String = "",
+    searchExpanded: Boolean = false,
+    onSearchExpandedChange: (Boolean) -> Unit = {},
+    onSearchQueryChange: (String) -> Unit = {}
 ) {
     val titleColor = if (dark) Color(0xFFF7F8F8) else Color(0xFF141414)
     Row(
@@ -1075,8 +1102,93 @@ private fun ArtistDetailTopBar(
             style = MaterialTheme.typography.headlineSmall,
             fontWeight = FontWeight.Black,
             maxLines = 1,
-            overflow = TextOverflow.Ellipsis
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
         )
+        if (showSearch) {
+            Spacer(Modifier.width(10.dp))
+            ArtistSongSearchControl(
+                query = searchQuery,
+                expanded = searchExpanded,
+                dark = dark,
+                onExpandedChange = onSearchExpandedChange,
+                onQueryChange = onSearchQueryChange
+            )
+        }
+    }
+}
+
+@Composable
+private fun ArtistSongSearchControl(
+    query: String,
+    expanded: Boolean,
+    dark: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+    onQueryChange: (String) -> Unit
+) {
+    val width by animateDpAsState(
+        targetValue = if (expanded) 184.dp else 46.dp,
+        animationSpec = spring(dampingRatio = 0.78f, stiffness = 520f),
+        label = "artist-song-search-width"
+    )
+    val fieldAlpha by animateFloatAsState(
+        targetValue = if (expanded) 1f else 0f,
+        animationSpec = tween(durationMillis = if (expanded) 180 else 90),
+        label = "artist-song-search-alpha"
+    )
+    val iconTint = if (dark) Color.White else Color(0xFF111111)
+    Surface(
+        color = if (dark) Color.White.copy(alpha = 0.10f) else Color.White.copy(alpha = 0.84f),
+        border = BorderStroke(1.dp, if (dark) Color.White.copy(alpha = 0.14f) else Color.Black.copy(alpha = 0.08f)),
+        shape = RoundedCornerShape(999.dp),
+        modifier = Modifier
+            .width(width)
+            .height(46.dp)
+            .shadow(if (dark) 0.dp else 14.dp, RoundedCornerShape(999.dp), clip = false)
+            .noRippleClick(shape = RoundedCornerShape(999.dp)) {
+                if (!expanded) onExpandedChange(true)
+            }
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Rounded.Search,
+                contentDescription = "搜索歌手单曲",
+                tint = iconTint,
+                modifier = Modifier
+                    .size(22.dp)
+                    .noRippleClick(shape = CircleShape) {
+                        onExpandedChange(!expanded)
+                    }
+            )
+            if (expanded) {
+                Spacer(Modifier.width(8.dp))
+                Box(modifier = Modifier.weight(1f).alpha(fieldAlpha)) {
+                    if (query.isBlank()) {
+                        Text(
+                            text = "搜索单曲",
+                            color = iconTint.copy(alpha = 0.42f),
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1
+                        )
+                    }
+                    BasicTextField(
+                        value = query,
+                        onValueChange = onQueryChange,
+                        singleLine = true,
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(
+                            color = iconTint,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 15.sp
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
+        }
     }
 }
 

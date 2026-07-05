@@ -336,7 +336,7 @@ fun SiListenBottomChrome(
                 }
                 MiniPlayer(
                     playback = playback,
-                    onOpenLyrics = { viewModel.openPlayerSheet(PlayerSheetPanel.Lyrics) },
+                    onOpenLyrics = { viewModel.openPlayerSheet(PlayerSheetPanel.Detail) },
                     onOpenQueue = { viewModel.openPlayerSheet(PlayerSheetPanel.Queue) },
                     onToggle = viewModel::togglePlayback,
                     onNext = viewModel::next,

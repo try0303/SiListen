@@ -154,9 +154,66 @@ class PlayerController(context: Context) {
     private var notificationArtworkJob: Job? = null
     private var notificationArtworkKey: String? = null
     private var notificationArtworkBitmap: Bitmap? = null
+    private var lastNotificationSignature: NotificationSignature? = null
+    private var restoredWithoutMedia = false
+
+    private data class NotificationSignature(
+        val songKey: String,
+        val isPlaying: Boolean,
+        val isPreparing: Boolean,
+        val isLiked: Boolean,
+        val desktopLyricEnabled: Boolean,
+        val contentTextOverride: String?,
+        val artworkKey: String?
+    )
 
     var state by mutableStateOf(PlaybackState())
         private set
+
+    fun hasRestoredStateWithoutMedia(): Boolean =
+        restoredWithoutMedia && state.currentSong != null && state.queue.isNotEmpty() && player.mediaItemCount == 0
+
+    fun restoreSnapshot(
+        queue: List<Song>,
+        currentIndex: Int,
+        positionMs: Long,
+        durationMs: Long,
+        playbackMode: PlaybackMode
+    ) {
+        if (queue.isEmpty() || state.currentSong != null || player.mediaItemCount > 0) return
+        val safeIndex = currentIndex.coerceIn(0, queue.lastIndex)
+        val currentSong = queue[safeIndex]
+        playSession++
+        restoredWithoutMedia = true
+        notificationDismissedByUser = true
+        state = PlaybackState(
+            queue = queue,
+            currentIndex = safeIndex,
+            currentSong = currentSong,
+            isPreparing = false,
+            isPlaying = false,
+            durationMs = durationMs.takeIf { it > 0L } ?: currentSong.durationMs,
+            positionMs = positionMs.coerceAtLeast(0L),
+            bufferedMs = positionMs.coerceAtLeast(0L),
+            playbackMode = playbackMode,
+            errorMessage = null
+        )
+        applyPlaybackMode()
+    }
+
+    fun selectRestoredQueueIndex(index: Int) {
+        if (!hasRestoredStateWithoutMedia()) return
+        val safeIndex = index.coerceIn(0, state.queue.lastIndex)
+        val song = state.queue[safeIndex]
+        state = state.copy(
+            currentIndex = safeIndex,
+            currentSong = song,
+            durationMs = song.durationMs,
+            positionMs = 0L,
+            bufferedMs = 0L,
+            errorMessage = null
+        )
+    }
 
     init {
         PlaybackNotificationBridge.attach(this)
@@ -200,17 +257,25 @@ class PlayerController(context: Context) {
         startIndex: Int,
         registry: MusicSourceRegistry
     ) {
-        playQueue(songs, startIndex) { song -> song.resolveWithRegistry(registry) }
+        playQueue(
+            songs = songs,
+            startIndex = startIndex,
+            resolver = { song -> song.resolveWithRegistry(registry) }
+        )
     }
 
     suspend fun playQueue(
         songs: List<Song>,
         startIndex: Int,
-        resolver: PlaybackStreamResolver
+        resolver: PlaybackStreamResolver,
+        startPositionMs: Long = 0L,
+        autoPlay: Boolean = true
     ) {
         if (songs.isEmpty()) return
         val session = ++playSession
+        restoredWithoutMedia = false
         val safeStartIndex = startIndex.coerceIn(0, songs.lastIndex)
+        val safeStartPositionMs = startPositionMs.coerceAtLeast(0L)
         val orderedSongs = buildList {
             add(songs[safeStartIndex])
             addAll(songs.filterIndexed { index, _ -> index != safeStartIndex })
@@ -222,8 +287,8 @@ class PlayerController(context: Context) {
             isPreparing = true,
             isPlaying = false,
             durationMs = orderedSongs.first().durationMs,
-            positionMs = 0L,
-            bufferedMs = 0L,
+            positionMs = safeStartPositionMs,
+            bufferedMs = safeStartPositionMs,
             errorMessage = null
         )
         notificationDismissedByUser = false
@@ -247,7 +312,12 @@ class PlayerController(context: Context) {
         player.setMediaItem(firstPlayable.second)
         applyPlaybackMode()
         player.prepare()
-        player.play()
+        if (safeStartPositionMs > 0L) {
+            player.seekTo(safeStartPositionMs)
+        }
+        if (autoPlay) {
+            player.play()
+        }
         syncNotification()
 
         val remainingPlayable = buildList {
@@ -368,19 +438,37 @@ class PlayerController(context: Context) {
     }
 
     fun seekTo(positionMs: Long) {
+        if (restoredWithoutMedia && player.mediaItemCount == 0) {
+            state = state.copy(positionMs = positionMs.coerceAtLeast(0L), bufferedMs = positionMs.coerceAtLeast(0L))
+            return
+        }
         player.seekTo(positionMs)
         updateProgress()
+        syncNotification(force = true)
     }
 
     fun updateProgress() {
-        state = state.copy(
+        if (restoredWithoutMedia && player.mediaItemCount == 0) {
+            val nextState = state.copy(isPlaying = false, isPreparing = false)
+            if (nextState != state) {
+                state = nextState
+            }
+            return
+        }
+        val previousState = state
+        val nextState = state.copy(
             durationMs = player.duration.takeIf { it > 0 } ?: state.currentSong?.durationMs ?: 0L,
             positionMs = player.currentPosition.coerceAtLeast(0L),
             bufferedMs = player.bufferedPosition.coerceAtLeast(0L),
             isPlaying = player.isPlaying,
             isPreparing = if (player.isPlaying) false else state.isPreparing
         )
-        syncNotification()
+        if (nextState != previousState) {
+            state = nextState
+        }
+        if (nextState.hasNotificationMeaningfulChangeFrom(previousState)) {
+            syncNotification()
+        }
     }
 
     fun dismissNotification() {
@@ -406,7 +494,7 @@ class PlayerController(context: Context) {
     }
 
     fun refreshNotification() {
-        syncNotification()
+        syncNotification(force = true)
     }
 
     fun release() {
@@ -419,12 +507,14 @@ class PlayerController(context: Context) {
         player.release()
     }
 
-    private fun syncNotification() {
+    private fun syncNotification(force: Boolean = false) {
         if (state.currentSong == null) {
+            lastNotificationSignature = null
             updateSystemMediaSession(isLiked = false)
             notificationController.cancel()
             PlaybackService.stop()
         } else if (notificationDismissedByUser && !state.isPlaying) {
+            lastNotificationSignature = null
             updateSystemMediaSession(isLiked = false)
             notificationController.cancel()
             PlaybackService.stop()
@@ -440,14 +530,29 @@ class PlayerController(context: Context) {
                 ?.takeIf { it == notificationArtworkKey }
                 ?.let { notificationArtworkBitmap }
             val isLiked = song?.let(PlaybackNotificationBridge::isLiked) == true
+            val desktopLyricEnabled = isDesktopLyricEnabled()
+            val contentTextOverride = if (notificationLyricEnabled) notificationLyricText else null
             updateSystemMediaSession(isLiked, artwork)
+            val signature = song?.let {
+                NotificationSignature(
+                    songKey = it.notificationContentKey(),
+                    isPlaying = state.isPlaying,
+                    isPreparing = state.isPreparing,
+                    isLiked = isLiked,
+                    desktopLyricEnabled = desktopLyricEnabled,
+                    contentTextOverride = contentTextOverride,
+                    artworkKey = artwork?.let { notificationArtworkKey }
+                )
+            }
+            if (!force && signature == lastNotificationSignature) return
+            lastNotificationSignature = signature
             val notification = notificationController.show(
                 playbackState = state,
                 mediaSessionToken = systemMediaSession.sessionToken,
                 isCurrentSongLiked = isLiked,
-                desktopLyricEnabled = isDesktopLyricEnabled(),
+                desktopLyricEnabled = desktopLyricEnabled,
                 artwork = artwork,
-                contentTextOverride = if (notificationLyricEnabled) notificationLyricText else null
+                contentTextOverride = contentTextOverride
             )
             if (notification != null) {
                 PlaybackService.update(
@@ -529,6 +634,16 @@ class PlayerController(context: Context) {
 
     private fun Song.notificationArtworkKey(): String = "$sourceId:$id:$coverUrl"
 
+    private fun Song.notificationContentKey(): String = "$sourceId:$id:$title:$artist:$album:$coverUrl"
+
+    private fun PlaybackState.hasNotificationMeaningfulChangeFrom(previous: PlaybackState): Boolean =
+        currentSong?.notificationContentKey() != previous.currentSong?.notificationContentKey() ||
+            isPlaying != previous.isPlaying ||
+            isPreparing != previous.isPreparing ||
+            playbackMode != previous.playbackMode ||
+            durationMs != previous.durationMs ||
+            currentIndex != previous.currentIndex
+
     private fun updateSystemMediaSession(isLiked: Boolean, artwork: Bitmap? = null) {
         val song = state.currentSong
         if (song == null) {
@@ -603,7 +718,7 @@ class PlayerController(context: Context) {
         val intent = Intent(appContext, com.silisten.app.MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra("open_player", true)
-            putExtra("player_panel", PlayerSheetPanel.Lyrics.name)
+            putExtra("player_panel", PlayerSheetPanel.Detail.name)
         }
         return PendingIntent.getActivity(
             appContext,

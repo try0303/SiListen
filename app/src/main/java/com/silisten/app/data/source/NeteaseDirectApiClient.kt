@@ -31,8 +31,22 @@ internal class NeteaseDirectApiClient(
     }
 
     private fun ensureDeviceCookies() {
-        if (cookieJar.cookieValue("os") != null) return
-        val deviceId = "SiListen_" + java.util.UUID.randomUUID().toString().replace("-", "").take(16)
+        val useAndroidProfile = cookieJar.cookieValue("os") != "android" ||
+            cookieJar.cookieValue("mobilename") != "SiListen"
+        if (useAndroidProfile) {
+            cookieJar.removeCookies(
+                setOf(
+                    "__remember_me",
+                    "ntes_kaola_ad",
+                    "_ntes_nuid",
+                    "_ntes_nnid",
+                    "WNMCID",
+                    "WEVNSM"
+                )
+            )
+        }
+        val deviceId = cookieJar.cookieValue("deviceId")
+            ?: "SiListen_" + java.util.UUID.randomUUID().toString().replace("-", "").take(16)
         val defaults = mapOf(
             "os" to "android",
             "appver" to "9.1.72",
@@ -45,7 +59,7 @@ internal class NeteaseDirectApiClient(
         )
         val existing = mutableMapOf<String, String>()
         defaults.forEach { (k, v) ->
-            if (cookieJar.cookieValue(k) == null) {
+            if (useAndroidProfile || cookieJar.cookieValue(k) == null) {
                 existing[k] = v
             }
         }
@@ -201,6 +215,15 @@ internal class NeteaseDirectApiClient(
                     "id" to request.param("id"),
                     "n" to request.param("n", "1000"),
                     "s" to request.param("s", "8")
+                )
+            )
+
+            "/personalized" -> postWeApi(
+                "/weapi/personalized/playlist",
+                mapOf(
+                    "limit" to request.param("limit", "12"),
+                    "total" to true,
+                    "n" to request.param("limit", "12")
                 )
             )
 

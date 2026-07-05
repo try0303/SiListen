@@ -91,7 +91,7 @@ class MainActivity : ComponentActivity() {
         if (currentIntent.getBooleanExtra("open_player", false)) {
             val panel = currentIntent.getStringExtra("player_panel")
                 ?.let { runCatching { PlayerSheetPanel.valueOf(it) }.getOrNull() }
-                ?: PlayerSheetPanel.Lyrics
+                ?: PlayerSheetPanel.Detail
             viewModel.openPlayerSheet(panel)
             currentIntent.removeExtra("open_player")
             currentIntent.removeExtra("player_panel")

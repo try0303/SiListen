@@ -62,7 +62,7 @@ class NeteaseApiClient(context: Context) {
             message = if (success) {
                 "验证码已发送，请留意网易云短信"
             } else {
-                shortError(json.optString("message", "验证码发送失败，可能触发了网易云风控"))
+                shortError(json.cleanMessage("验证码发送失败，可能触发了网易云风控"))
             }
         )
     }
@@ -71,20 +71,31 @@ class NeteaseApiClient(context: Context) {
         val json = getJson(
             "/login/cellphone?phone=${phone.encode()}&captcha=${captcha.encode()}&ctcode=86&timestamp=${System.currentTimeMillis()}"
         )
-        if (json.optInt("code") != 200) {
+        val code = json.optInt("code", -1)
+        Log.d(
+            TAG,
+            "SMS login response code=$code message=${json.cleanMessage("").take(80)} hasProfile=${json.optJSONObject("profile") != null} hasAccount=${json.optJSONObject("account") != null}"
+        )
+        if (code != 200) {
             return@withContext NeteaseLoginState(
                 loggedIn = false,
                 user = null,
-                message = shortError(json.optString("message", "登录失败，请检查手机号或验证码"))
+                message = shortError(json.loginFailureMessage(code))
             )
         }
-        json.optString("cookie").takeIf { it.isNotBlank() }?.let { cookieJar.saveCookieHeader(it, neteaseHttpUrl()) }
-        val user = json.optJSONObject("profile")?.toUser()
-        if (user != null) {
-            saveUser(user)
-            NeteaseLoginState(true, user, "网易云音乐登录成功")
-        } else {
-            refreshLoginState()
+        json.cleanString("cookie").takeIf { it.isNotBlank() }?.let { cookieJar.saveCookieHeader(it, neteaseHttpUrl()) }
+        val responseUser = json.optJSONObject("profile")?.toUser()
+            ?: json.optJSONObject("account")?.toAccountUser(json.optJSONObject("profile"))
+        responseUser?.let(::saveUser)
+        val refreshed = runCatching { refreshLoginState() }.getOrNull()
+        when {
+            refreshed?.loggedIn == true -> refreshed.copy(message = "网易云音乐登录成功")
+            responseUser != null -> NeteaseLoginState(true, responseUser, "网易云音乐登录成功")
+            else -> NeteaseLoginState(
+                loggedIn = false,
+                user = null,
+                message = shortError(json.cleanMessage("验证码已通过，但没有拿到登录态，请重新获取验证码后再试"))
+            )
         }
     }
 
@@ -196,8 +207,13 @@ class NeteaseApiClient(context: Context) {
         val json = runCatching {
             getJson("/login/status?timestamp=${System.currentTimeMillis()}")
         }.getOrNull()
-        val remoteUser = json?.optJSONObject("data")?.optJSONObject("profile")?.toUser()
-        val user = remoteUser ?: if (json == null) localUser else null
+        val data = json?.optJSONObject("data")
+        val remoteUser = data?.optJSONObject("profile")?.toUser()
+            ?: json?.optJSONObject("profile")?.toUser()
+            ?: data?.let { it.optJSONObject("account")?.toAccountUser(it.optJSONObject("profile")) }
+            ?: json?.optJSONObject("account")?.toAccountUser(json.optJSONObject("profile"))
+        val code = json?.optInt("code", -1) ?: -1
+        val user = remoteUser ?: if (json == null || (code == 200 && localUser != null)) localUser else null
         if (remoteUser != null) {
             saveUser(remoteUser)
             NeteaseLoginState(true, remoteUser, "已登录网易云音乐")
@@ -250,8 +266,22 @@ class NeteaseApiClient(context: Context) {
         if (id == 0L) return null
         return NeteaseUser(
             userId = id,
-            nickname = optString("nickname", "网易云用户"),
-            avatarUrl = optString("avatarUrl", "")
+            nickname = cleanString("nickname").ifBlank { "网易云用户" },
+            avatarUrl = cleanString("avatarUrl")
+        )
+    }
+
+    private fun JSONObject.toAccountUser(profile: JSONObject? = null): NeteaseUser? {
+        val id = optLong("id", optLong("userId", 0L))
+        if (id == 0L) return null
+        return NeteaseUser(
+            userId = id,
+            nickname = profile?.cleanString("nickname")
+                ?.ifBlank { cleanString("userName") }
+                ?.ifBlank { cleanString("nickname") }
+                ?.ifBlank { "网易云用户" }
+                ?: cleanString("userName").ifBlank { cleanString("nickname") }.ifBlank { "网易云用户" },
+            avatarUrl = profile?.cleanString("avatarUrl").orEmpty()
         )
     }
 
@@ -288,10 +318,41 @@ class NeteaseApiClient(context: Context) {
         return "data:image/png;base64,${Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)}"
     }
 
+    private fun JSONObject.cleanMessage(fallback: String): String =
+        listOf("message", "msg", "error", "errmsg", "msgCode")
+            .firstNotNullOfOrNull { key -> cleanString(key).takeIf { it.isNotBlank() } }
+            ?: optJSONObject("data")?.let { data ->
+                listOf("message", "msg", "error", "errmsg", "url")
+                    .firstNotNullOfOrNull { key -> data.cleanString(key).takeIf { it.isNotBlank() } }
+            }
+            ?: fallback
+
+    private fun JSONObject.cleanString(key: String): String {
+        val value = opt(key) ?: return ""
+        if (value == JSONObject.NULL) return ""
+        return value.toString().replace(Regex("\\s+"), " ").trim().takeUnless {
+            it.equals("null", ignoreCase = true) ||
+                it.equals("undefined", ignoreCase = true)
+        }.orEmpty()
+    }
+
+    private fun JSONObject.loginFailureMessage(code: Int): String {
+        val serverMessage = cleanMessage("")
+        return when (code) {
+            -462 -> serverMessage.ifBlank { "网易云要求完成安全验证，请重新获取验证码或稍后再试" }
+            10004 -> serverMessage.ifBlank { "当前登录存在安全风险，请稍后再试" }
+            400, 502 -> serverMessage.ifBlank { "登录请求被网易云拒绝，请重新获取验证码后再试" }
+            501 -> serverMessage.ifBlank { "手机号未注册或暂不支持该账号登录" }
+            503 -> serverMessage.ifBlank { "验证码错误或已过期，请重新获取验证码" }
+            505 -> serverMessage.ifBlank { "账号存在安全限制，请在网易云音乐官方 App 处理后再试" }
+            else -> serverMessage.ifBlank { "登录失败，网易云返回状态码 $code，请重新获取验证码后再试" }
+        }
+    }
+
     private fun shortError(message: String): String {
         val cleaned = message.replace(Regex("\\s+"), " ").trim()
         return when {
-            cleaned.isBlank() -> "请求失败，请稍后重试"
+            cleaned.isBlank() || cleaned.equals("null", ignoreCase = true) -> "请求失败，请稍后重试"
             cleaned.contains("failed to connect", ignoreCase = true) ||
                 cleaned.contains("connection refused", ignoreCase = true) ->
                 "网易云接口连接失败，请检查网络后重试"
@@ -351,6 +412,16 @@ internal class PersistentCookieJar(
 
     fun clear() {
         preferences.edit().remove("cookies").apply()
+    }
+
+    fun removeCookies(names: Set<String>) {
+        if (names.isEmpty()) return
+        val existing = loadCookieMap().toMutableMap()
+        var changed = false
+        names.forEach { name ->
+            changed = existing.remove(name) != null || changed
+        }
+        if (changed) saveCookieMap(existing)
     }
 
     private fun loadCookieMap(): Map<String, String> {

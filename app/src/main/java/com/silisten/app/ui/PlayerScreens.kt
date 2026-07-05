@@ -130,6 +130,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -154,15 +155,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.PointerInputChange
-import androidx.compose.ui.input.pointer.PointerInputScope
-import androidx.compose.ui.input.pointer.AwaitPointerEventScope
-import androidx.compose.ui.input.pointer.PointerId
-import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
-import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -232,7 +227,6 @@ import com.silisten.app.data.model.Song
 import com.silisten.app.playback.PlaybackMode
 import com.silisten.app.playback.PlaybackState
 import com.silisten.app.ui.kernelsu.KernelSuFloatingBottomBar
-import com.silisten.app.ui.kernelsu.LocalKernelSuFloatingBottomBarContentTint
 import com.silisten.app.ui.kernelsu.KernelSuFloatingBottomBarItem
 import com.silisten.app.ui.theme.accentColor
 import com.silisten.app.ui.theme.appBackgroundBrush
@@ -246,6 +240,7 @@ import coil.request.ImageRequest
 import coil.request.SuccessResult
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.LinkedHashMap
 import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.android.awaitFrame
@@ -256,7 +251,6 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.blur.LayerBackdrop as MiuixLayerBackdrop
-import top.yukonga.miuix.kmp.blur.layerBackdrop as miuixLayerBackdrop
 import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop as rememberMiuixLayerBackdrop
 import kotlin.math.abs
 import kotlin.math.floor
@@ -520,6 +514,23 @@ fun PlaybackErrorBar(
 private enum class PlayerPage { Detail, Lyrics, Queue, Comments }
 
 private val playerPages = PlayerPage.entries.toList()
+private const val PLAYER_BACKGROUND_CACHE_PREFIX = "player-background"
+private const val PLAYER_PALETTE_CACHE_PREFIX = "player-palette"
+private val dynamicPaletteCacheLock = Any()
+private val dynamicPaletteCache = object : LinkedHashMap<String, Pair<Color, Color>>(24, 0.75f, true) {
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<Color, Color>>?): Boolean {
+        return size > 24
+    }
+}
+
+private fun readDynamicPaletteCache(coverUrl: String): Pair<Color, Color>? =
+    synchronized(dynamicPaletteCacheLock) { dynamicPaletteCache[coverUrl] }
+
+private fun writeDynamicPaletteCache(coverUrl: String, palette: Pair<Color, Color>) {
+    synchronized(dynamicPaletteCacheLock) {
+        dynamicPaletteCache[coverUrl] = palette
+    }
+}
 
 private fun PlayerSheetPanel.toPlayerPage(): PlayerPage = when (this) {
     PlayerSheetPanel.Detail -> PlayerPage.Detail
@@ -531,22 +542,37 @@ private fun PlayerSheetPanel.toPlayerPage(): PlayerPage = when (this) {
 @Composable
 private fun rememberDynamicPalette(coverUrl: String?): Pair<Color, Color> {
     val context = LocalContext.current
-    var dominant by remember { mutableStateOf(Color(0xFF1A1A2E)) }
-    var vibrant by remember { mutableStateOf(Color(0xFF16213E)) }
+    val paletteImageLoader = remember(context) { ImageLoader(context.applicationContext) }
+    val defaultPalette = Color(0xFF1A1A2E) to Color(0xFF16213E)
+    var dominant by remember { mutableStateOf(defaultPalette.first) }
+    var vibrant by remember { mutableStateOf(defaultPalette.second) }
     LaunchedEffect(coverUrl) {
-        if (coverUrl.isNullOrBlank()) return@LaunchedEffect
-        val loader = ImageLoader(context)
+        if (coverUrl.isNullOrBlank()) {
+            dominant = defaultPalette.first
+            vibrant = defaultPalette.second
+            return@LaunchedEffect
+        }
+        readDynamicPaletteCache(coverUrl)?.let { cached ->
+            dominant = cached.first
+            vibrant = cached.second
+            return@LaunchedEffect
+        }
         val request = ImageRequest.Builder(context)
             .data(coverUrl)
             .allowHardware(false)
-            .size(200)
+            .memoryCacheKey("$PLAYER_PALETTE_CACHE_PREFIX-$coverUrl")
+            .diskCacheKey("$PLAYER_PALETTE_CACHE_PREFIX-$coverUrl")
+            .size(160)
             .build()
-        val result = runCatching { loader.execute(request) }.getOrNull()
+        val result = runCatching { paletteImageLoader.execute(request) }.getOrNull()
         val bitmap = (result as? SuccessResult)?.drawable?.let { it as? BitmapDrawable }?.bitmap
             ?: return@LaunchedEffect
         val palette = Palette.from(bitmap).generate()
-        palette.dominantSwatch?.rgb?.let { dominant = Color(it) }
-        (palette.vibrantSwatch ?: palette.mutedSwatch)?.rgb?.let { vibrant = Color(it) }
+        val resolvedDominant = palette.dominantSwatch?.rgb?.let(::Color) ?: defaultPalette.first
+        val resolvedVibrant = (palette.vibrantSwatch ?: palette.mutedSwatch)?.rgb?.let(::Color) ?: defaultPalette.second
+        writeDynamicPaletteCache(coverUrl, resolvedDominant to resolvedVibrant)
+        dominant = resolvedDominant
+        vibrant = resolvedVibrant
     }
     val animDominant by animateColorAsState(
         targetValue = dominant,
@@ -567,10 +593,20 @@ private fun DynamicPlayerBackground(
     accent: Color,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    val backgroundRequest = remember(context, coverUrl) {
+        ImageRequest.Builder(context)
+            .data(coverUrl)
+            .memoryCacheKey("$PLAYER_BACKGROUND_CACHE_PREFIX-${coverUrl.orEmpty()}")
+            .diskCacheKey("$PLAYER_BACKGROUND_CACHE_PREFIX-${coverUrl.orEmpty()}")
+            .size(180)
+            .crossfade(false)
+            .build()
+    }
     val (dominant, vibrant) = rememberDynamicPalette(coverUrl)
     Box(modifier = modifier) {
         AsyncImage(
-            model = coverUrl,
+            model = backgroundRequest,
             contentDescription = null,
             contentScale = ContentScale.Crop,
             modifier = Modifier
@@ -659,67 +695,86 @@ private val playerTabItems = listOf(
     PlayerTabItem(PlayerPage.Comments, "评论", Icons.AutoMirrored.Rounded.Comment)
 )
 
+private fun Modifier.protectPlayerTabDragFromSheetDismiss(): Modifier = pointerInput(Unit) {
+    val dragSlopPx = 8.dp.toPx()
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        var pointerId = down.id
+        var totalX = 0f
+        var totalY = 0f
+        var shouldProtectSheet = false
+
+        while (true) {
+            val event = awaitPointerEvent()
+            val change = event.changes.firstOrNull { it.id == pointerId }
+                ?: event.changes.firstOrNull()?.also { pointerId = it.id }
+                ?: break
+            if (change.changedToUpIgnoreConsumed()) break
+
+            val delta = change.positionChange()
+            totalX += delta.x
+            totalY += delta.y
+
+            if (!shouldProtectSheet &&
+                (abs(totalX) > dragSlopPx || abs(totalY) > dragSlopPx)
+            ) {
+                shouldProtectSheet = true
+            }
+            if (shouldProtectSheet) {
+                change.consume()
+            }
+        }
+    }
+}
+
 @Composable
 private fun PlayerTabBar(
     currentPage: Int,
+    selectedPosition: Float?,
+    backdrop: MiuixLayerBackdrop,
+    darkTheme: Boolean,
+    accent: Color,
     onPageSelect: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Surface(
-        color = Color.White.copy(alpha = 0.075f),
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.10f)),
-        shape = RoundedCornerShape(28.dp),
+    val contentColor = Color.White.copy(alpha = 0.94f)
+    KernelSuFloatingBottomBar(
+        selectedIndex = currentPage.coerceIn(0, playerTabItems.lastIndex),
+        selectedPosition = selectedPosition,
+        onSelected = onPageSelect,
+        backdrop = backdrop,
+        tabsCount = playerTabItems.size,
+        darkTheme = darkTheme,
+        accentColor = accent,
+        containerColor = Color.Black.copy(alpha = 0.54f),
+        isBlurEnabled = false,
+        useLiquidGlassFallback = false,
         modifier = modifier
-            .fillMaxWidth()
             .padding(horizontal = 20.dp, vertical = 8.dp)
-            .height(58.dp)
+            .protectPlayerTabDragFromSheetDismiss()
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 6.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            playerTabItems.forEachIndexed { index, item ->
+        playerTabItems.forEachIndexed { index, item ->
+            key(item.page) {
                 val selected = index == currentPage
-                val tint by animateColorAsState(
-                    targetValue = if (selected) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.62f),
-                    animationSpec = spring(dampingRatio = 0.78f, stiffness = 480f),
-                    label = "tab-tint"
-                )
-                val bgAlpha by animateFloatAsState(
-                    targetValue = if (selected) 0.14f else 0f,
-                    animationSpec = spring(dampingRatio = 0.78f, stiffness = 480f),
-                    label = "tab-bg"
-                )
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxHeight()
-                        .clip(RoundedCornerShape(22.dp))
-                        .background(Color.White.copy(alpha = bgAlpha))
-                        .noRippleClick(shape = RoundedCornerShape(22.dp)) { onPageSelect(index) },
-                    contentAlignment = Alignment.Center
+                val tint = if (selected) contentColor else contentColor.copy(alpha = 0.66f)
+                KernelSuFloatingBottomBarItem(
+                    index = index,
+                    onClick = { onPageSelect(index) }
                 ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Icon(
-                            imageVector = item.icon,
-                            contentDescription = item.label,
-                            tint = tint,
-                            modifier = Modifier.size(22.dp)
-                        )
-                        Spacer(Modifier.height(3.dp))
-                        Text(
-                            text = item.label,
-                            color = tint,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = if (selected) FontWeight.Black else FontWeight.Bold
-                        )
-                    }
+                    Icon(
+                        imageVector = item.icon,
+                        contentDescription = item.label,
+                        tint = tint,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Text(
+                        text = item.label,
+                        color = tint,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = if (selected) FontWeight.Black else FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Clip
+                    )
                 }
             }
         }
@@ -739,6 +794,7 @@ private fun PlayerDetailPage(
     onSeek: (Long) -> Unit,
     onRefreshLyrics: () -> Unit,
     onToggleLike: (Song) -> Unit,
+    onArtistClick: (Song) -> Unit,
     playbackMode: PlaybackMode,
     sleepTimer: SleepTimerState,
     lyrics: List<LyricLine>,
@@ -827,13 +883,23 @@ private fun PlayerDetailPage(
                         overflow = TextOverflow.Ellipsis
                     )
                     Spacer(Modifier.height(4.dp))
+                    val artistClickable = song != null && song.artist.isNotBlank() && song.artist != "未知歌手"
                     Text(
                         text = song?.artist ?: "未知歌手",
-                        color = Color.White.copy(alpha = 0.60f),
+                        color = if (artistClickable) {
+                            Color.White.copy(alpha = 0.78f)
+                        } else {
+                            Color.White.copy(alpha = 0.60f)
+                        },
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = if (artistClickable && song != null) {
+                            Modifier.noRippleClick(shape = RoundedCornerShape(8.dp)) { onArtistClick(song) }
+                        } else {
+                            Modifier
+                        }
                     )
                 }
                 if (song != null && song.sourceId != "local") {
@@ -1389,6 +1455,7 @@ fun FullPlayer(
     onSeek: (Long) -> Unit,
     onRefreshLyrics: () -> Unit,
     onToggleLike: (Song) -> Unit,
+    onArtistClick: (Song) -> Unit,
     onPlaybackModeChange: (PlaybackMode) -> Unit,
     onStartSleepTimer: (Int, Boolean) -> Unit,
     onCancelSleepTimer: () -> Unit,
@@ -1400,6 +1467,7 @@ fun FullPlayer(
 ) {
     val song = playback.currentSong
     val accent = themeSettings.accentColor()
+    val playerTabBackdrop = rememberMiuixLayerBackdrop()
     val activeLyricIndex = remember(lyrics, playback.positionMs) {
         lyrics.indexOfLast { it.timeMs <= playback.positionMs }.coerceAtLeast(0)
     }
@@ -1408,6 +1476,16 @@ fun FullPlayer(
         playerPages.indexOf(initialPanel.toPlayerPage()).coerceAtLeast(0)
     }
     val pagerState = rememberPagerState(initialPage = initialPage, pageCount = { playerPages.size })
+    val lyricsPageIndex = remember { playerPages.indexOf(PlayerPage.Lyrics).coerceAtLeast(0) }
+    val lyricsAnimationsEnabled by remember {
+        derivedStateOf { pagerState.currentPage == lyricsPageIndex }
+    }
+    val playerTabPosition by remember {
+        derivedStateOf {
+            (pagerState.currentPage + pagerState.currentPageOffsetFraction)
+                .fastCoerceIn(0f, (playerPages.size - 1).toFloat())
+        }
+    }
     val artworkFraction by remember {
         derivedStateOf {
             if (pagerState.currentPage == 0) {
@@ -1463,6 +1541,7 @@ fun FullPlayer(
                         onSeek = onSeek,
                         onRefreshLyrics = onRefreshLyrics,
                         onToggleLike = onToggleLike,
+                        onArtistClick = onArtistClick,
                         playbackMode = playback.playbackMode,
                         sleepTimer = sleepTimer,
                         lyrics = lyrics,
@@ -1499,6 +1578,7 @@ fun FullPlayer(
                             onRefreshLyrics = onRefreshLyrics,
                             accent = accent,
                             dark = true,
+                            animationsEnabled = lyricsAnimationsEnabled,
                             modifier = Modifier.fillMaxSize()
                         )
                         LyricDisplayMode.Word -> GlassLyricsPanel(
@@ -1522,6 +1602,7 @@ fun FullPlayer(
                             accent = accent,
                             dark = true,
                             wordByWord = true,
+                            animationsEnabled = lyricsAnimationsEnabled,
                             modifier = Modifier.fillMaxSize()
                         )
                         LyricDisplayMode.Plain -> GlassLyricsPanel(
@@ -1545,6 +1626,7 @@ fun FullPlayer(
                             accent = accent,
                             dark = true,
                             plain = true,
+                            animationsEnabled = lyricsAnimationsEnabled,
                             modifier = Modifier.fillMaxSize()
                         )
                         LyricDisplayMode.Particles -> ParticleLyricsPanel(
@@ -1582,6 +1664,10 @@ fun FullPlayer(
             }
             PlayerTabBar(
                 currentPage = pagerState.currentPage,
+                selectedPosition = playerTabPosition,
+                backdrop = playerTabBackdrop,
+                darkTheme = true,
+                accent = accent,
                 onPageSelect = { index ->
                     pagerScope.launch { pagerState.animateScrollToPage(index) }
                 }
@@ -2416,6 +2502,7 @@ private fun GlassLyricsPanel(
     dark: Boolean,
     wordByWord: Boolean = false,
     plain: Boolean = false,
+    animationsEnabled: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     val noLyricsAvailable = !isLoading && lyrics.isNoLyricsPlaceholder()
@@ -2437,8 +2524,8 @@ private fun GlassLyricsPanel(
         interpolatedMs = playbackPositionMs
     }
 
-    LaunchedEffect(isPlaying, lastKnownMs) {
-        if (!isPlaying) {
+    LaunchedEffect(isPlaying, animationsEnabled, lastKnownMs) {
+        if (!isPlaying || !animationsEnabled) {
             interpolatedMs = lastKnownMs
             return@LaunchedEffect
         }
