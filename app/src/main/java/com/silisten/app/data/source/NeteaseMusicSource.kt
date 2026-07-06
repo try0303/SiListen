@@ -152,9 +152,11 @@ class NeteaseMusicSource(
             )
             val playlistJson = json.optJSONObject("playlist")
             val tracks = playlistJson?.optJSONArray("tracks").orEmpty().toSongs()
-            tracks.ifEmpty {
-                val ids = playlistJson?.optJSONArray("trackIds").orEmpty().ids()
-                songsByIds(ids.take(50))
+            val ids = playlistJson?.optJSONArray("trackIds").orEmpty().ids()
+            if (ids.size > tracks.size) {
+                songsByIds(ids).ifEmpty { tracks }
+            } else {
+                tracks.ifEmpty { songsByIds(ids) }
             }
         }.getOrDefault(emptyList())
         playlist.copy(
@@ -625,9 +627,11 @@ class NeteaseMusicSource(
 
     private suspend fun songsByIds(ids: List<Long>): List<Song> {
         if (ids.isEmpty()) return emptyList()
-        val joined = ids.joinToString(",")
-        val json = apiClient.getJson("/song/detail?ids=$joined&timestamp=${System.currentTimeMillis()}")
-        return json.optJSONArray("songs").orEmpty().toSongs()
+        return ids.distinct().chunked(200).flatMap { chunk ->
+            val joined = chunk.joinToString(",")
+            val json = apiClient.getJson("/song/detail?ids=$joined&timestamp=${System.currentTimeMillis()}")
+            json.optJSONArray("songs").orEmpty().toSongs()
+        }
     }
 
     private fun seedSongs(): List<Song> = listOf(

@@ -684,7 +684,7 @@ class MusicRepository(
         const val SINGLE_SOURCE_SEARCH_TIMEOUT_MS = 3_800L
         const val MULTI_SOURCE_SEARCH_TIMEOUT_MS = 2_800L
         const val COLLECTION_SEARCH_TIMEOUT_MS = 2_600L
-        const val COLLECTION_DETAIL_TIMEOUT_MS = 6_000L
+        const val COLLECTION_DETAIL_TIMEOUT_MS = 15_000L
         const val LYRIC_MATCH_SEARCH_TIMEOUT_MS = 3_000L
         const val LYRIC_MATCH_MIN_SCORE = 74
         val collectionSourceIds = setOf(

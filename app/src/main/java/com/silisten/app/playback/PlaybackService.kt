@@ -104,19 +104,21 @@ class PlaybackService : Service() {
             val appContext = context.applicationContext
             pendingNotification = notification
             pendingForeground = foreground
-            activeService?.let { service ->
+            val service = activeService
+            if (service != null) {
                 if (foreground) {
                     service.promoteToForeground(notification)
                 } else {
                     service.leaveForeground(removeNotification = false)
                 }
+                return
             }
-            if (foreground || activeService != null) {
+            if (foreground) {
                 val intent = Intent(appContext, PlaybackService::class.java).apply {
                     action = ACTION_UPDATE
                     putExtra(EXTRA_FOREGROUND, foreground)
                 }
-                if (foreground && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     appContext.startForegroundService(intent)
                 } else {
                     appContext.startService(intent)

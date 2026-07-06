@@ -48,7 +48,7 @@ enum class PlaybackMode(
     val label: String,
     val description: String
 ) {
-    Order("顺序播放", "按当前列表顺序播放，播到列表末尾后停止"),
+    Order("顺序播放", "按当前列表顺序播放，播到末尾后从头继续"),
     RepeatOne("单曲循环", "一直重复当前歌曲"),
     Shuffle("随机播放", "从当前队列里随机播放歌曲"),
     StopAtEnd("禁用歌曲切换", "当前歌曲播完后暂停，不自动进入下一首")
@@ -156,6 +156,11 @@ class PlayerController(context: Context) {
     private var notificationArtworkBitmap: Bitmap? = null
     private var lastNotificationSignature: NotificationSignature? = null
     private var restoredWithoutMedia = false
+    private var playableQueueIndexes: List<Int> = emptyList()
+    private var playableQueueSongs: List<Song> = emptyList()
+    private var activeResolver: PlaybackStreamResolver? = null
+    private var queuePrefetchJob: Job? = null
+    private var priorityResolveJob: Job? = null
 
     private data class NotificationSignature(
         val songKey: String,
@@ -185,6 +190,11 @@ class PlayerController(context: Context) {
         val currentSong = queue[safeIndex]
         playSession++
         restoredWithoutMedia = true
+        playableQueueIndexes = emptyList()
+        playableQueueSongs = emptyList()
+        activeResolver = null
+        queuePrefetchJob?.cancel()
+        priorityResolveJob?.cancel()
         notificationDismissedByUser = true
         state = PlaybackState(
             queue = queue,
@@ -240,10 +250,12 @@ class PlayerController(context: Context) {
                 }
 
                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                    val index = player.currentMediaItemIndex.coerceAtLeast(0)
+                    val mediaIndex = player.currentMediaItemIndex
+                    val index = player.currentQueueIndex()
                     state = state.copy(
                         currentIndex = index,
-                        currentSong = state.queue.getOrNull(index),
+                        currentSong = playableQueueSongs.getOrNull(mediaIndex)
+                            ?: state.queue.getOrNull(index),
                         isPreparing = false
                     )
                     updateProgress()
@@ -274,6 +286,11 @@ class PlayerController(context: Context) {
         if (songs.isEmpty()) return
         val session = ++playSession
         restoredWithoutMedia = false
+        playableQueueIndexes = emptyList()
+        playableQueueSongs = emptyList()
+        activeResolver = resolver
+        queuePrefetchJob?.cancel()
+        priorityResolveJob?.cancel()
         val safeStartIndex = startIndex.coerceIn(0, songs.lastIndex)
         val safeStartPositionMs = startPositionMs.coerceAtLeast(0L)
         val orderedSongs = buildList {
@@ -292,8 +309,12 @@ class PlayerController(context: Context) {
             errorMessage = null
         )
         notificationDismissedByUser = false
+        player.stop()
+        player.clearMediaItems()
 
-        val firstPlayable = orderedSongs.firstNotNullOfOrNull { song -> song.toPlayable(resolver) }
+        val firstPlayable = orderedSongs.withIndex().firstNotNullOfOrNull { (index, song) ->
+            song.toPlayable(resolver)?.let { index to it }
+        }
             ?: run {
                 state = state.copy(
                     isPreparing = false,
@@ -301,15 +322,20 @@ class PlayerController(context: Context) {
                 )
                 return
             }
+        val firstPlayableIndex = firstPlayable.first
+        val firstPlayableSong = firstPlayable.second.first
+        val firstPlayableItem = firstPlayable.second.second
         if (session != playSession) return
         state = state.copy(
             queue = orderedSongs,
-            currentIndex = 0,
-            currentSong = firstPlayable.first,
+            currentIndex = firstPlayableIndex,
+            currentSong = firstPlayableSong,
             isPreparing = false,
             errorMessage = null
         )
-        player.setMediaItem(firstPlayable.second)
+        playableQueueIndexes = listOf(firstPlayableIndex)
+        playableQueueSongs = listOf(firstPlayableSong)
+        player.setMediaItem(firstPlayableItem)
         applyPlaybackMode()
         player.prepare()
         if (safeStartPositionMs > 0L) {
@@ -320,20 +346,16 @@ class PlayerController(context: Context) {
         }
         syncNotification()
 
-        val remainingPlayable = buildList {
-            for (song in orderedSongs.drop(1).take(8)) {
-                if (session != playSession) return
-                song.toPlayable(resolver)?.let(::add)
+        queuePrefetchJob = notificationScope.launch {
+            for ((index, song) in orderedSongs.withIndex()) {
+                if (index == firstPlayableIndex) continue
+                if (session != playSession) return@launch
+                if (playableQueueIndexes.contains(index)) continue
+                val playable = song.toPlayable(resolver) ?: continue
+                if (session != playSession) return@launch
+                appendPlayableItem(index, playable, keepPlaybackOrder = true)
             }
         }
-        if (session != playSession) return
-        if (remainingPlayable.isEmpty()) return
-        val playable = listOf(firstPlayable) + remainingPlayable
-        val playableSongs = playable.map { it.first }
-        val remainingItems = remainingPlayable.map { it.second }
-        state = state.copy(queue = playableSongs, currentIndex = 0, currentSong = playableSongs.first())
-        player.addMediaItems(remainingItems)
-        applyPlaybackMode()
     }
 
     private suspend fun Song.toPlayable(resolver: PlaybackStreamResolver): Pair<Song, MediaItem>? {
@@ -371,13 +393,22 @@ class PlayerController(context: Context) {
             return state.currentSong?.id == song.id
         }
         val playable = song.toPlayable(resolver) ?: return false
-        val insertIndex = (player.currentMediaItemIndex + 1)
+        val mediaInsertIndex = (player.currentMediaItemIndex + 1)
+            .coerceIn(0, player.mediaItemCount)
+        val queueInsertIndex = (state.currentIndex + 1)
             .coerceIn(0, state.queue.size)
         val nextQueue = state.queue.toMutableList().apply {
-            add(insertIndex, playable.first)
+            add(queueInsertIndex, playable.first)
         }
         state = state.copy(queue = nextQueue, errorMessage = null)
-        player.addMediaItem(insertIndex, playable.second)
+        playableQueueIndexes = playableQueueIndexes
+            .map { if (it >= queueInsertIndex) it + 1 else it }
+            .toMutableList()
+            .apply { add(mediaInsertIndex, queueInsertIndex) }
+        playableQueueSongs = playableQueueSongs
+            .toMutableList()
+            .apply { add(mediaInsertIndex, playable.first) }
+        player.addMediaItem(mediaInsertIndex, playable.second)
         syncNotification()
         return true
     }
@@ -422,13 +453,26 @@ class PlayerController(context: Context) {
         }
         if (player.hasNextMediaItem()) {
             player.seekToNextMediaItem()
+        } else {
+            nextUnresolvedQueueIndex(direction = 1)?.let { targetIndex ->
+                seekToQueueIndex(targetIndex, startPlayback = player.isPlaying)
+            }
         }
         updateProgress()
     }
 
     fun previous() {
         notificationDismissedByUser = false
-        if (player.hasPreviousMediaItem()) player.seekToPreviousMediaItem() else player.seekTo(0L)
+        if (player.hasPreviousMediaItem()) {
+            player.seekToPreviousMediaItem()
+        } else {
+            nextUnresolvedQueueIndex(direction = -1)?.let { targetIndex ->
+                seekToQueueIndex(targetIndex, startPlayback = player.isPlaying)
+                updateProgress()
+                return
+            }
+            player.seekTo(0L)
+        }
         updateProgress()
     }
 
@@ -499,6 +543,8 @@ class PlayerController(context: Context) {
 
     fun release() {
         PlaybackNotificationBridge.detach(this)
+        queuePrefetchJob?.cancel()
+        priorityResolveJob?.cancel()
         notificationArtworkJob?.cancel()
         notificationScope.cancel()
         notificationController.cancel()
@@ -569,7 +615,7 @@ class PlayerController(context: Context) {
         player.repeatMode = when (state.playbackMode) {
             PlaybackMode.RepeatOne -> Player.REPEAT_MODE_ONE
             PlaybackMode.Shuffle -> Player.REPEAT_MODE_ALL
-            PlaybackMode.Order,
+            PlaybackMode.Order -> Player.REPEAT_MODE_ALL
             PlaybackMode.StopAtEnd -> Player.REPEAT_MODE_OFF
         }
         player.shuffleModeEnabled = state.playbackMode == PlaybackMode.Shuffle
@@ -579,31 +625,126 @@ class PlayerController(context: Context) {
     }
 
     private fun randomNextIndex(): Int? {
-        val playableCount = minOf(player.mediaItemCount, state.queue.size)
+        val playableCount = minOf(player.mediaItemCount, playableQueueIndexes.size)
         if (playableCount <= 1) return null
-        val currentIndex = player.currentMediaItemIndex
+        val currentMediaIndex = player.currentMediaItemIndex
             .takeIf { it in 0 until playableCount }
-            ?: state.currentIndex.coerceIn(0, playableCount - 1)
+            ?: playableQueueIndexes.indexOf(state.currentIndex).takeIf { it >= 0 }
+            ?: 0
         var targetIndex = Random.nextInt(playableCount - 1)
-        if (targetIndex >= currentIndex) targetIndex += 1
-        return targetIndex.coerceIn(0, playableCount - 1)
+        if (targetIndex >= currentMediaIndex) targetIndex += 1
+        return playableQueueIndexes.getOrNull(targetIndex)
     }
 
     private fun seekToQueueIndex(index: Int, startPlayback: Boolean) {
         if (state.queue.isEmpty() || player.mediaItemCount == 0) return
-        val targetIndex = index.coerceIn(0, minOf(state.queue.lastIndex, player.mediaItemCount - 1))
-        player.seekTo(targetIndex, 0L)
+        val targetIndex = index.coerceIn(0, state.queue.lastIndex)
+        val mediaIndex = playableQueueIndexes.indexOf(targetIndex)
+        if (mediaIndex < 0) {
+            resolveAndSeekToQueueIndex(targetIndex, startPlayback)
+            return
+        }
+        seekToPlayableMediaIndex(targetIndex, mediaIndex, startPlayback)
+    }
+
+    private fun resolveAndSeekToQueueIndex(targetIndex: Int, startPlayback: Boolean) {
+        val resolver = activeResolver
+        val targetSong = state.queue.getOrNull(targetIndex)
+        if (resolver == null || targetSong == null) {
+            state = state.copy(
+                currentIndex = targetIndex,
+                currentSong = targetSong,
+                isPreparing = false,
+                errorMessage = "\u5f53\u524d\u6b4c\u66f2\u6682\u65f6\u65e0\u6cd5\u64ad\u653e"
+            )
+            syncNotification()
+            return
+        }
+        priorityResolveJob?.cancel()
+        state = state.copy(
+            currentIndex = targetIndex,
+            currentSong = targetSong,
+            isPreparing = true,
+            errorMessage = null
+        )
+        syncNotification(force = true)
+        priorityResolveJob = notificationScope.launch {
+            val session = playSession
+            val playable = targetSong.toPlayable(resolver)
+            if (session != playSession) return@launch
+            if (playable == null) {
+                state = state.copy(
+                    currentIndex = targetIndex,
+                    currentSong = targetSong,
+                    isPreparing = false,
+                    isPlaying = false,
+                    errorMessage = "\u5f53\u524d\u6b4c\u66f2\u6682\u65f6\u65e0\u6cd5\u64ad\u653e"
+                )
+                syncNotification(force = true)
+                return@launch
+            }
+            val mediaIndex = appendPlayableItem(targetIndex, playable, keepPlaybackOrder = true)
+            seekToPlayableMediaIndex(targetIndex, mediaIndex, startPlayback)
+        }
+    }
+
+    private fun seekToPlayableMediaIndex(targetIndex: Int, mediaIndex: Int, startPlayback: Boolean) {
+        player.seekTo(mediaIndex, 0L)
         if (startPlayback) {
             player.play()
         }
         state = state.copy(
             currentIndex = targetIndex,
-            currentSong = state.queue.getOrNull(targetIndex),
+            currentSong = playableQueueSongs.getOrNull(mediaIndex)
+                ?: state.queue.getOrNull(targetIndex),
             isPreparing = false,
             isPlaying = if (startPlayback) true else player.isPlaying,
             errorMessage = null
         )
         updateProgress()
+    }
+
+    private fun appendPlayableItem(
+        queueIndex: Int,
+        playable: Pair<Song, MediaItem>,
+        keepPlaybackOrder: Boolean = false
+    ): Int {
+        val existingMediaIndex = playableQueueIndexes.indexOf(queueIndex)
+        if (existingMediaIndex >= 0) return existingMediaIndex
+        val insertIndex = if (keepPlaybackOrder) {
+            playableQueueIndexes.size
+        } else {
+            playableQueueIndexes.indexOfFirst { it > queueIndex }
+                .takeIf { it >= 0 }
+                ?: playableQueueIndexes.size
+        }
+        playableQueueIndexes = playableQueueIndexes.toMutableList().apply { add(insertIndex, queueIndex) }
+        playableQueueSongs = playableQueueSongs.toMutableList().apply { add(insertIndex, playable.first) }
+        player.addMediaItem(insertIndex, playable.second)
+        applyPlaybackMode()
+        return insertIndex
+    }
+
+    private fun nextUnresolvedQueueIndex(direction: Int): Int? {
+        if (state.queue.isEmpty()) return null
+        var index = state.currentIndex + direction
+        while (index in state.queue.indices) {
+            if (!playableQueueIndexes.contains(index)) return index
+            index += direction
+        }
+        if (state.playbackMode != PlaybackMode.Order) return null
+        index = if (direction > 0) 0 else state.queue.lastIndex
+        while (index in state.queue.indices && index != state.currentIndex) {
+            if (!playableQueueIndexes.contains(index)) return index
+            index += direction
+        }
+        return null
+    }
+
+    private fun Player.currentQueueIndex(): Int {
+        val mediaIndex = currentMediaItemIndex
+        return playableQueueIndexes.getOrNull(mediaIndex)
+            ?: state.currentIndex.coerceIn(0, state.queue.lastIndex.coerceAtLeast(0))
     }
 
     private fun ensureNotificationArtwork(song: Song) {
