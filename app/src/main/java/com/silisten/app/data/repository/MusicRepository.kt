@@ -5,6 +5,7 @@ import com.silisten.app.data.model.CustomSourceConfig
 import com.silisten.app.data.model.MusicPlaylist
 import com.silisten.app.data.model.PlaybackQuality
 import com.silisten.app.data.model.PlaylistCommentBundle
+import com.silisten.app.data.model.PlaylistCommentReply
 import com.silisten.app.data.model.PlaylistCommentSort
 import com.silisten.app.data.model.Song
 import com.silisten.app.data.model.SourcePlatformIds
@@ -23,6 +24,7 @@ import com.silisten.app.data.source.NeteaseActionResult
 import com.silisten.app.data.source.NeteaseMusicSource
 import com.silisten.app.data.source.PagedMusicSearchSource
 import com.silisten.app.data.source.SongCommentSource
+import com.silisten.app.data.source.SongCommentReplySource
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -336,6 +338,19 @@ class MusicRepository(
         val commentSong = song.withCommentSourceIdentity(commentSourceId) ?: return null
         val source = registry.findById(commentSourceId) as? SongCommentSource ?: return null
         return source.commentsForSong(commentSong, sort, limit, offset)
+    }
+
+    suspend fun songCommentReplies(
+        song: Song,
+        commentId: String,
+        sourceSettings: SourceSettingsState,
+        limit: Int = 50
+    ): List<PlaylistCommentReply> {
+        val commentSourceId = song.commentSourceId(sourceSettings.enabledCommentPlatformIds)
+            ?: return emptyList()
+        val commentSong = song.withCommentSourceIdentity(commentSourceId) ?: return emptyList()
+        val source = registry.findById(commentSourceId) as? SongCommentReplySource ?: return emptyList()
+        return source.repliesForSongComment(commentSong, commentId, limit)
     }
 
     suspend fun neteaseTogglePlaylistSubscription(

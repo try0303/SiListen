@@ -747,6 +747,7 @@ fun SiListenApp(viewModel: SiListenViewModel) {
                         playerCommentsHasMore = uiState.playerCommentsHasMore,
                         isPlayerCommentsLoading = uiState.isPlayerCommentsLoading,
                         isLoadingMorePlayerComments = uiState.isLoadingMorePlayerComments,
+                        playerCommentReplyLoadingIds = uiState.playerCommentReplyLoadingIds,
                         playerCommentsMessage = uiState.playerCommentsMessage,
                         themeSettings = uiState.themeSettings,
                         lyricDisplayMode = uiState.playbackSettings.lyricDisplayMode,
@@ -770,7 +771,8 @@ fun SiListenApp(viewModel: SiListenViewModel) {
                         onDismissLikePrompt = viewModel::dismissLikePrompt,
                         onPlayerCommentSortChange = viewModel::selectPlayerCommentSort,
                         onRefreshPlayerComments = viewModel::refreshPlayerComments,
-                        onLoadMorePlayerComments = viewModel::loadMorePlayerComments
+                        onLoadMorePlayerComments = viewModel::loadMorePlayerComments,
+                        onLoadPlayerCommentReplies = viewModel::loadPlayerCommentReplies
                     )
                 }
             }

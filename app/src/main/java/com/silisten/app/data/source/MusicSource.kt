@@ -4,6 +4,7 @@ import com.silisten.app.data.model.MusicPlaylist
 import com.silisten.app.data.model.MusicSourceInfo
 import com.silisten.app.data.model.LyricLine
 import com.silisten.app.data.model.PlaylistCommentBundle
+import com.silisten.app.data.model.PlaylistCommentReply
 import com.silisten.app.data.model.PlaylistCommentSort
 import com.silisten.app.data.model.Song
 
@@ -41,4 +42,12 @@ interface SongCommentSource {
         limit: Int = 30,
         offset: Int = 0
     ): PlaylistCommentBundle
+}
+
+interface SongCommentReplySource {
+    suspend fun repliesForSongComment(
+        song: Song,
+        commentId: String,
+        limit: Int = 50
+    ): List<PlaylistCommentReply>
 }

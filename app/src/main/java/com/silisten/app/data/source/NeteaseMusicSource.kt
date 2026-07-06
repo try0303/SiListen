@@ -25,7 +25,7 @@ import org.json.JSONObject
 class NeteaseMusicSource(
     private val apiClient: NeteaseApiClient,
     private val qualityProvider: () -> PlaybackQuality = { PlaybackQuality.ExHigh }
-) : MusicSource, PagedMusicSearchSource, CollectionSearchSource, CollectionDetailSource, SongCommentSource {
+) : MusicSource, PagedMusicSearchSource, CollectionSearchSource, CollectionDetailSource, SongCommentSource, SongCommentReplySource {
     override val info = MusicSourceInfo(
         id = "netease",
         name = "云翼曲库",
@@ -607,6 +607,21 @@ class NeteaseMusicSource(
             PlaylistCommentSort.Hot -> hotSongComments(song, limit, offset)
             PlaylistCommentSort.Latest -> songComments(song, limit, offset)
         }
+
+    override suspend fun repliesForSongComment(
+        song: Song,
+        commentId: String,
+        limit: Int
+    ): List<PlaylistCommentReply> = withContext(Dispatchers.IO) {
+        val safeLimit = limit.coerceIn(1, 50)
+        runCatching {
+            val json = apiClient.getJson(
+                "/comment/floor?parentCommentId=${commentId.encode()}&id=${song.id.encode()}&type=0&limit=$safeLimit&timestamp=${System.currentTimeMillis()}"
+            )
+            val data = json.optJSONObject("data") ?: json
+            data.optJSONArray("comments").orEmpty().toCommentReplies()
+        }.getOrDefault(emptyList())
+    }
 
     private suspend fun officialStreamUrl(song: Song, quality: PlaybackQuality): String {
         val streamJson = runCatching {

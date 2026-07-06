@@ -1440,6 +1440,7 @@ fun FullPlayer(
     playerCommentsHasMore: Boolean,
     isPlayerCommentsLoading: Boolean,
     isLoadingMorePlayerComments: Boolean,
+    playerCommentReplyLoadingIds: Set<String>,
     playerCommentsMessage: String?,
     themeSettings: ThemeSettingsState,
     lyricDisplayMode: LyricDisplayMode,
@@ -1463,7 +1464,8 @@ fun FullPlayer(
     onDismissLikePrompt: (String) -> Unit,
     onPlayerCommentSortChange: (PlaylistCommentSort) -> Unit,
     onRefreshPlayerComments: () -> Unit,
-    onLoadMorePlayerComments: () -> Unit
+    onLoadMorePlayerComments: () -> Unit,
+    onLoadPlayerCommentReplies: (String) -> Unit
 ) {
     val song = playback.currentSong
     val accent = themeSettings.accentColor()
@@ -1653,12 +1655,14 @@ fun FullPlayer(
                         hasMore = playerCommentsHasMore,
                         isLoading = isPlayerCommentsLoading,
                         isLoadingMore = isLoadingMorePlayerComments,
+                        replyLoadingIds = playerCommentReplyLoadingIds,
                         message = playerCommentsMessage,
                         dark = true,
                         accent = accent,
                         onSortChange = onPlayerCommentSortChange,
                         onRefresh = onRefreshPlayerComments,
-                        onLoadMore = onLoadMorePlayerComments
+                        onLoadMore = onLoadMorePlayerComments,
+                        onLoadReplies = onLoadPlayerCommentReplies
                     )
                 }
             }
@@ -2031,12 +2035,14 @@ private fun PlayerCommentsPanel(
     hasMore: Boolean,
     isLoading: Boolean,
     isLoadingMore: Boolean,
+    replyLoadingIds: Set<String>,
     message: String?,
     dark: Boolean,
     accent: Color,
     onSortChange: (PlaylistCommentSort) -> Unit,
     onRefresh: () -> Unit,
-    onLoadMore: () -> Unit
+    onLoadMore: () -> Unit,
+    onLoadReplies: (String) -> Unit
 ) {
     val sortTitle = if (commentSort == PlaylistCommentSort.Hot) "热门评论" else "最新评论"
     val listState = rememberLazyListState()
@@ -2154,8 +2160,10 @@ private fun PlayerCommentsPanel(
         items(comments, key = { it.id }) { comment ->
             PlayerCommentFlowRow(
                 comment = comment,
+                isRepliesLoading = comment.id in replyLoadingIds,
                 dark = dark,
-                accent = accent
+                accent = accent,
+                onLoadReplies = onLoadReplies
             )
         }
         item {
@@ -2182,8 +2190,10 @@ private fun PlayerCommentsPanel(
 @Composable
 private fun PlayerCommentFlowRow(
     comment: PlaylistComment,
+    isRepliesLoading: Boolean,
     dark: Boolean,
-    accent: Color
+    accent: Color,
+    onLoadReplies: (String) -> Unit
 ) {
     val titleColor = if (dark) Color.White.copy(alpha = 0.94f) else Color(0xFF171717)
     val mutedText = if (dark) Color.White.copy(alpha = 0.48f) else Color(0xFF83878D)
@@ -2250,9 +2260,20 @@ private fun PlayerCommentFlowRow(
                 PlayerCommentReplies(
                     comment = comment,
                     expanded = repliesExpanded,
+                    isLoading = isRepliesLoading,
                     dark = dark,
                     accent = accent,
-                    onToggle = { repliesExpanded = !repliesExpanded }
+                    onToggle = {
+                        val nextExpanded = !repliesExpanded
+                        repliesExpanded = nextExpanded
+                        if (
+                            nextExpanded &&
+                            !comment.repliesComplete &&
+                            comment.replyCount > comment.replies.size
+                        ) {
+                            onLoadReplies(comment.id)
+                        }
+                    }
                 )
             }
         }
@@ -2308,6 +2329,7 @@ private fun PlayerCommentImages(
 private fun PlayerCommentReplies(
     comment: PlaylistComment,
     expanded: Boolean,
+    isLoading: Boolean,
     dark: Boolean,
     accent: Color,
     onToggle: () -> Unit
@@ -2316,7 +2338,12 @@ private fun PlayerCommentReplies(
     val titleColor = if (dark) Color.White.copy(alpha = 0.88f) else Color(0xFF202124)
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
-            text = if (expanded) "收起回复" else "展开更多回复",
+            text = when {
+                expanded -> "收起回复"
+                comment.replies.isEmpty() -> "查看回复"
+                comment.replyCount > comment.replies.size -> "展开更多回复"
+                else -> "查看回复"
+            },
             color = accent,
             style = MaterialTheme.typography.labelLarge,
             fontWeight = FontWeight.Black,
@@ -2350,12 +2377,36 @@ private fun PlayerCommentReplies(
                     }
                 }
                 val missingCount = (comment.replyCount - comment.replies.size).coerceAtLeast(0)
-                if (missingCount > 0) {
+                if (isLoading) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(15.dp),
+                            strokeWidth = 2.dp,
+                            color = accent
+                        )
+                        Text(
+                            text = "正在加载回复...",
+                            color = accent,
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Black
+                        )
+                    }
+                } else if (missingCount > 0 && !comment.repliesComplete) {
                     Text(
-                        text = "还有 $missingCount 条回复暂未加载",
+                        text = "还有 $missingCount 条回复，点击可继续尝试加载",
                         color = accent,
                         style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.Black
+                    )
+                } else if (comment.replies.isEmpty()) {
+                    Text(
+                        text = "暂时没有更多回复",
+                        color = mutedText,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold
                     )
                 }
             }

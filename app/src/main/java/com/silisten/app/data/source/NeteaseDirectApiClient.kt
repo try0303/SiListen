@@ -318,6 +318,23 @@ internal class NeteaseDirectApiClient(
                 )
             }
 
+            "/comment/floor" -> {
+                val resource = when (request.param("type", "0")) {
+                    "2" -> "A_PL_0_${request.param("id")}"
+                    "3" -> "R_AL_3_${request.param("id")}"
+                    else -> "R_SO_4_${request.param("id")}"
+                }
+                postWeApi(
+                    "/api/resource/comment/floor/get",
+                    mapOf(
+                        "parentCommentId" to request.param("parentCommentId"),
+                        "threadId" to resource,
+                        "time" to request.param("time", "-1"),
+                        "limit" to request.param("limit", "20")
+                    )
+                )
+            }
+
             else -> unsupported(pathAndQuery)
         }
     }

@@ -74,7 +74,8 @@ data class PlaylistComment(
     val likedCount: Int = 0,
     val replyCount: Int = 0,
     val images: List<PlaylistCommentImage> = emptyList(),
-    val replies: List<PlaylistCommentReply> = emptyList()
+    val replies: List<PlaylistCommentReply> = emptyList(),
+    val repliesComplete: Boolean = false
 )
 
 data class PlaylistCommentImage(

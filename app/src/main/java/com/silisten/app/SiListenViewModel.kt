@@ -158,6 +158,7 @@ data class SiListenUiState(
     val playerCommentsHasMore: Boolean = false,
     val isPlayerCommentsLoading: Boolean = false,
     val isLoadingMorePlayerComments: Boolean = false,
+    val playerCommentReplyLoadingIds: Set<String> = emptySet(),
     val playerCommentsMessage: String? = null,
     val likedSongIds: Set<String> = emptySet(),
     val songLikeLoadingIds: Set<String> = emptySet(),
@@ -1075,6 +1076,48 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         loadPlayerComments(song, force = false, append = true)
     }
 
+    fun loadPlayerCommentReplies(commentId: String) {
+        val song = playbackState.currentSong ?: return
+        val comment = uiState.playerComments.firstOrNull { it.id == commentId } ?: return
+        if (comment.repliesComplete || comment.id in uiState.playerCommentReplyLoadingIds) return
+        uiState = uiState.copy(
+            playerCommentReplyLoadingIds = uiState.playerCommentReplyLoadingIds + comment.id,
+            playerCommentsMessage = null
+        )
+        val commentSongKey = song.playerCommentCacheKey()
+        viewModelScope.launch {
+            val replies = runCatching {
+                musicRepository.songCommentReplies(
+                    song = song,
+                    commentId = comment.id,
+                    sourceSettings = uiState.sourceSettings
+                )
+            }.getOrDefault(emptyList())
+            if (playbackState.currentSong?.playerCommentCacheKey() != commentSongKey) return@launch
+            uiState = uiState.copy(
+                playerCommentReplyLoadingIds = uiState.playerCommentReplyLoadingIds - comment.id,
+                playerComments = uiState.playerComments.map { item ->
+                    if (item.id != comment.id) {
+                        item
+                    } else {
+                        val mergedReplies = (item.replies + replies)
+                            .distinctBy { reply -> "${reply.authorName}:${reply.content}:${reply.timeLabel}" }
+                        item.copy(
+                            replies = mergedReplies,
+                            replyCount = maxOf(item.replyCount, mergedReplies.size),
+                            repliesComplete = replies.isNotEmpty() || mergedReplies.size >= item.replyCount
+                        )
+                    }
+                },
+                playerCommentsMessage = if (replies.isEmpty() && comment.replies.isEmpty()) {
+                    "\u6682\u65f6\u6ca1\u6709\u52a0\u8f7d\u5230\u66f4\u591a\u56de\u590d"
+                } else {
+                    null
+                }
+            )
+        }
+    }
+
     fun toggleSelectedPlaylistSubscription() {
         val playlist = uiState.selectedPlaylist ?: return
         if (uiState.isPlaylistSubscriptionLoading || !playlist.supportsSubscriptionAction()) return
@@ -1985,6 +2028,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
                 isLoadingMorePlayerComments = append,
                 playerComments = if (force && !append) emptyList() else uiState.playerComments,
                 playerCommentsHasMore = if (append) uiState.playerCommentsHasMore else false,
+                playerCommentReplyLoadingIds = if (append) uiState.playerCommentReplyLoadingIds else emptySet(),
                 playerCommentsMessage = null
             )
             val bundle = runCatching {
@@ -2013,6 +2057,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
                         playerCommentsHasMore = false,
                         isPlayerCommentsLoading = false,
                         isLoadingMorePlayerComments = false,
+                        playerCommentReplyLoadingIds = emptySet(),
                         playerCommentsMessage = "当前歌曲没有启用可用的评论来源"
                     )
                 }
