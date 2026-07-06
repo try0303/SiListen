@@ -1105,7 +1105,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
                         item.copy(
                             replies = mergedReplies,
                             replyCount = maxOf(item.replyCount, mergedReplies.size),
-                            repliesComplete = replies.isNotEmpty() || mergedReplies.size >= item.replyCount
+                            repliesComplete = mergedReplies.size >= item.replyCount && item.replyCount > 0
                         )
                     }
                 },

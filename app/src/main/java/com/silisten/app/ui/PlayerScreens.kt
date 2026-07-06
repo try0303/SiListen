@@ -516,6 +516,7 @@ private enum class PlayerPage { Detail, Lyrics, Queue, Comments }
 private val playerPages = PlayerPage.entries.toList()
 private const val PLAYER_BACKGROUND_CACHE_PREFIX = "player-background"
 private const val PLAYER_PALETTE_CACHE_PREFIX = "player-palette"
+private const val PlayerCommentReplyPreviewLimit = 5
 private val dynamicPaletteCacheLock = Any()
 private val dynamicPaletteCache = object : LinkedHashMap<String, Pair<Color, Color>>(24, 0.75f, true) {
     override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<Color, Color>>?): Boolean {
@@ -2273,7 +2274,8 @@ private fun PlayerCommentFlowRow(
                         ) {
                             onLoadReplies(comment.id)
                         }
-                    }
+                    },
+                    onLoadMore = { onLoadReplies(comment.id) }
                 )
             }
         }
@@ -2332,7 +2334,8 @@ private fun PlayerCommentReplies(
     isLoading: Boolean,
     dark: Boolean,
     accent: Color,
-    onToggle: () -> Unit
+    onToggle: () -> Unit,
+    onLoadMore: () -> Unit
 ) {
     val mutedText = if (dark) Color.White.copy(alpha = 0.52f) else Color(0xFF73777F)
     val titleColor = if (dark) Color.White.copy(alpha = 0.88f) else Color(0xFF202124)
@@ -2349,7 +2352,7 @@ private fun PlayerCommentReplies(
             fontWeight = FontWeight.Black,
             modifier = Modifier.noRippleClick(RoundedCornerShape(6.dp), onClick = onToggle)
         )
-        AnimatedVisibility(visible = expanded) {
+        AnimatedVisibility(visible = expanded || isLoading) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2358,7 +2361,8 @@ private fun PlayerCommentReplies(
                     .padding(horizontal = 12.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(9.dp)
             ) {
-                comment.replies.forEach { reply ->
+                val visibleReplies = comment.replies.take(PlayerCommentReplyPreviewLimit)
+                visibleReplies.forEach { reply ->
                     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
                         Text(
                             text = reply.authorName,
@@ -2376,7 +2380,9 @@ private fun PlayerCommentReplies(
                         )
                     }
                 }
-                val missingCount = (comment.replyCount - comment.replies.size).coerceAtLeast(0)
+                val hiddenLoadedCount = (comment.replies.size - visibleReplies.size).coerceAtLeast(0)
+                val unloadedCount = (comment.replyCount - comment.replies.size).coerceAtLeast(0)
+                val remainingCount = hiddenLoadedCount + unloadedCount
                 if (isLoading) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -2394,12 +2400,17 @@ private fun PlayerCommentReplies(
                             fontWeight = FontWeight.Black
                         )
                     }
-                } else if (missingCount > 0 && !comment.repliesComplete) {
+                } else if (remainingCount > 0) {
                     Text(
-                        text = "还有 $missingCount 条回复，点击可继续尝试加载",
+                        text = if (!comment.repliesComplete && unloadedCount > 0) {
+                            "还有 $remainingCount 条回复，点击可继续尝试加载"
+                        } else {
+                            "还有 $remainingCount 条回复"
+                        },
                         color = accent,
                         style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.Black
+                        fontWeight = FontWeight.Black,
+                        modifier = Modifier.noRippleClick(RoundedCornerShape(6.dp), onClick = onLoadMore)
                     )
                 } else if (comment.replies.isEmpty()) {
                     Text(

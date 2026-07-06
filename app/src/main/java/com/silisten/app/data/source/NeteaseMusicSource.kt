@@ -619,7 +619,12 @@ class NeteaseMusicSource(
                 "/comment/floor?parentCommentId=${commentId.encode()}&id=${song.id.encode()}&type=0&limit=$safeLimit&timestamp=${System.currentTimeMillis()}"
             )
             val data = json.optJSONObject("data") ?: json
-            data.optJSONArray("comments").orEmpty().toCommentReplies()
+            buildList {
+                addAll(data.optJSONArray("comments").toCommentReplies())
+                addAll(data.optJSONArray("replies").toCommentReplies())
+                addAll(data.optJSONObject("showFloorComment")?.optJSONArray("comments").toCommentReplies())
+                addAll(data.optJSONObject("floorComment")?.optJSONArray("comments").toCommentReplies())
+            }.distinctBy { "${it.authorName}:${it.content}:${it.timeLabel}" }
         }.getOrDefault(emptyList())
     }
 

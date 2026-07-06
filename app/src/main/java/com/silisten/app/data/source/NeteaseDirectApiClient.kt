@@ -325,7 +325,7 @@ internal class NeteaseDirectApiClient(
                     else -> "R_SO_4_${request.param("id")}"
                 }
                 postWeApi(
-                    "/api/resource/comment/floor/get",
+                    "/weapi/resource/comment/floor/get",
                     mapOf(
                         "parentCommentId" to request.param("parentCommentId"),
                         "threadId" to resource,
