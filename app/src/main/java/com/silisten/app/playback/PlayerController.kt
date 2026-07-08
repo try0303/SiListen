@@ -19,9 +19,9 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
-import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -82,7 +82,11 @@ class PlayerController(context: Context) {
         .setAllowCrossProtocolRedirects(true)
         .setConnectTimeoutMs(5_000)
         .setReadTimeoutMs(15_000)
-    private val dataSourceFactory = DefaultDataSource.Factory(context, httpDataSourceFactory)
+    private val upstreamDataSourceFactory = DefaultDataSource.Factory(context, httpDataSourceFactory)
+    private val dataSourceFactory = CacheDataSource.Factory()
+        .setCache(PlaybackCache.cache(appContext))
+        .setUpstreamDataSourceFactory(upstreamDataSourceFactory)
+        .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
 
     private val player = ExoPlayer.Builder(context)
         .setMediaSourceFactory(
@@ -346,16 +350,7 @@ class PlayerController(context: Context) {
         }
         syncNotification()
 
-        queuePrefetchJob = notificationScope.launch {
-            for ((index, song) in orderedSongs.withIndex()) {
-                if (index == firstPlayableIndex) continue
-                if (session != playSession) return@launch
-                if (playableQueueIndexes.contains(index)) continue
-                val playable = song.toPlayable(resolver) ?: continue
-                if (session != playSession) return@launch
-                appendPlayableItem(index, playable, keepPlaybackOrder = true)
-            }
-        }
+        startQueuePrefetch(session, orderedSongs, resolver, skipIndex = firstPlayableIndex)
     }
 
     private suspend fun Song.toPlayable(resolver: PlaybackStreamResolver): Pair<Song, MediaItem>? {
@@ -364,6 +359,7 @@ class PlayerController(context: Context) {
         return resolvedSong to MediaItem.Builder()
             .setUri(streamUrl)
             .setMediaId(resolvedSong.id)
+            .setCustomCacheKey(resolvedSong.playbackCacheKey())
             .setMediaMetadata(
                 MediaMetadata.Builder()
                     .setTitle(resolvedSong.title)
@@ -374,6 +370,28 @@ class PlayerController(context: Context) {
             )
             .build()
     }
+
+    private fun Song.playbackCacheKey(): String =
+        buildString {
+            append("silisten:")
+            append(playbackSourceId?.takeIf { it.isNotBlank() } ?: sourceId.ifBlank { "unknown" })
+            append(':')
+            append(id)
+            canonicalSourceId?.takeIf { it.isNotBlank() }?.let { source ->
+                append(":canonical=")
+                append(source)
+                append(':')
+                append(canonicalSongId.orEmpty())
+            }
+            providerIds.toSortedMap().forEach { (key, value) ->
+                if (key.isNotBlank() && value.isNotBlank()) {
+                    append(':')
+                    append(key)
+                    append('=')
+                    append(value)
+                }
+            }
+        }
 
     private suspend fun Song.resolveWithRegistry(registry: MusicSourceRegistry): Pair<Song, String>? {
         val streamUrl = streamHint?.takeIf { it.isNotBlank() }
@@ -441,6 +459,17 @@ class PlayerController(context: Context) {
         if (stopAfterCurrentSongForTimer == enabled) return
         stopAfterCurrentSongForTimer = enabled
         applyPlaybackMode()
+    }
+
+    fun updateResolver(resolver: PlaybackStreamResolver) {
+        activeResolver = resolver
+        if (restoredWithoutMedia || state.queue.isEmpty()) return
+        queuePrefetchJob?.cancel()
+        if (player.mediaItemCount == 0 && state.currentSong != null) {
+            resolveAndSeekToQueueIndex(state.currentIndex, startPlayback = false)
+        } else {
+            startQueuePrefetch(playSession, state.queue, resolver)
+        }
     }
 
     fun next() {
@@ -610,7 +639,6 @@ class PlayerController(context: Context) {
         }
     }
 
-    @OptIn(UnstableApi::class)
     private fun applyPlaybackMode() {
         player.repeatMode = when (state.playbackMode) {
             PlaybackMode.RepeatOne -> Player.REPEAT_MODE_ONE
@@ -690,6 +718,9 @@ class PlayerController(context: Context) {
 
     private fun seekToPlayableMediaIndex(targetIndex: Int, mediaIndex: Int, startPlayback: Boolean) {
         player.seekTo(mediaIndex, 0L)
+        if (player.playbackState == Player.STATE_IDLE) {
+            player.prepare()
+        }
         if (startPlayback) {
             player.play()
         }
@@ -723,6 +754,25 @@ class PlayerController(context: Context) {
         player.addMediaItem(insertIndex, playable.second)
         applyPlaybackMode()
         return insertIndex
+    }
+
+    private fun startQueuePrefetch(
+        session: Int,
+        songs: List<Song>,
+        resolver: PlaybackStreamResolver,
+        skipIndex: Int? = null
+    ) {
+        queuePrefetchJob?.cancel()
+        queuePrefetchJob = notificationScope.launch {
+            for ((index, song) in songs.withIndex()) {
+                if (index == skipIndex) continue
+                if (session != playSession) return@launch
+                if (playableQueueIndexes.contains(index)) continue
+                val playable = song.toPlayable(resolver) ?: continue
+                if (session != playSession) return@launch
+                appendPlayableItem(index, playable, keepPlaybackOrder = true)
+            }
+        }
     }
 
     private fun nextUnresolvedQueueIndex(direction: Int): Int? {

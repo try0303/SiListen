@@ -31,10 +31,12 @@ import com.silisten.app.data.model.SourceSettingsState
 import com.silisten.app.data.model.neteaseIdentityId
 import com.silisten.app.data.model.normalizeBuiltInPlatformId
 import com.silisten.app.data.repository.AccountRepository
+import com.silisten.app.data.repository.ImageCacheRepository
 import com.silisten.app.data.repository.LastPlaybackStore
 import com.silisten.app.data.repository.LocalPlaylistRecord
 import com.silisten.app.data.repository.LocalPlaylistStore
 import com.silisten.app.data.repository.MusicRepository
+import com.silisten.app.data.repository.PlaylistImportRepository
 import com.silisten.app.data.repository.RecentPlaybackStore
 import com.silisten.app.data.repository.SourceSettingsStore
 import com.silisten.app.data.source.MusicSourceRegistry
@@ -47,6 +49,7 @@ import com.silisten.app.playback.LyricOverlayService
 import com.silisten.app.playback.PlaybackNotificationBridge
 import com.silisten.app.playback.PlaybackStreamResolver
 import com.silisten.app.playback.PlaybackMode
+import com.silisten.app.playback.PlaybackCache
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -54,6 +57,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 enum class AppTab { Home, Search, Sources, Account, Settings }
 
@@ -111,6 +115,12 @@ data class SleepTimerState(
     val pendingStopAfterCurrentSong: Boolean = false
 )
 
+data class CacheStatsState(
+    val musicBytes: Long = 0L,
+    val imageBytes: Long = 0L,
+    val loading: Boolean = false
+)
+
 data class ArtistSongsPageState(
     val artistId: String = "",
     val songs: List<Song> = emptyList(),
@@ -165,6 +175,7 @@ data class SiListenUiState(
     val likePrompt: LikePromptState? = null,
     val playlistChooserSong: Song? = null,
     val playlistAddLoadingIds: Set<String> = emptySet(),
+    val isPlaylistImporting: Boolean = false,
     val subscribedPlaylistIds: Set<String> = emptySet(),
     val isPlaylistSubscriptionLoading: Boolean = false,
     val searchQuery: String = "",
@@ -183,6 +194,7 @@ data class SiListenUiState(
     val lyrics: List<LyricLine> = emptyList(),
     val isLyricLoading: Boolean = false,
     val sleepTimer: SleepTimerState = SleepTimerState(),
+    val cacheStats: CacheStatsState = CacheStatsState(),
     val message: String? = null
 )
 
@@ -237,6 +249,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
     private val lastPlaybackStore = LastPlaybackStore(application)
     private val localPlaylistStore = LocalPlaylistStore(application)
     private var localPlaylistRecords = localPlaylistStore.load()
+    private val imageCacheRepository = ImageCacheRepository(application)
     private val sourceSettingsStore = SourceSettingsStore(application)
     private val initialSourceSettings = sourceSettingsStore.load()
     private val themePreferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
@@ -252,6 +265,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         customPlaybackSourceClient = CustomPlaybackSourceClient(application),
         playbackQualityProvider = { currentPlaybackQuality() }
     )
+    private val playlistImportRepository = PlaylistImportRepository(musicRepository)
     val registry: MusicSourceRegistry = musicRepository.registry
     private val player = PlaybackCenter.controller(application)
 
@@ -368,6 +382,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
 
     fun openPlaybackSettings() {
         uiState = uiState.copy(settingsRoute = SettingsRoute.Playback)
+        refreshCacheStats()
     }
 
     fun openSourceSettings() {
@@ -503,6 +518,57 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         uiState = uiState.copy(playbackSettings = next)
         savePlaybackSettings(next)
         player.setPlaybackMode(mode)
+    }
+
+    fun refreshCacheStats() {
+        if (uiState.cacheStats.loading) return
+        uiState = uiState.copy(cacheStats = uiState.cacheStats.copy(loading = true))
+        val appContext = getApplication<Application>()
+        viewModelScope.launch {
+            val musicBytes = withContext(Dispatchers.IO) { PlaybackCache.sizeBytes(appContext) }
+            val imageBytes = withContext(Dispatchers.IO) { imageCacheRepository.sizeBytes() }
+            uiState = uiState.copy(
+                cacheStats = CacheStatsState(
+                    musicBytes = musicBytes,
+                    imageBytes = imageBytes,
+                    loading = false
+                )
+            )
+        }
+    }
+
+    fun clearMusicCache() {
+        uiState = uiState.copy(cacheStats = uiState.cacheStats.copy(loading = true))
+        val appContext = getApplication<Application>()
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { PlaybackCache.clear(appContext) }
+            val imageBytes = withContext(Dispatchers.IO) { imageCacheRepository.sizeBytes() }
+            uiState = uiState.copy(
+                cacheStats = CacheStatsState(
+                    musicBytes = 0L,
+                    imageBytes = imageBytes,
+                    loading = false
+                ),
+                message = "音乐缓存已清除"
+            )
+        }
+    }
+
+    fun clearImageCache() {
+        uiState = uiState.copy(cacheStats = uiState.cacheStats.copy(loading = true))
+        val appContext = getApplication<Application>()
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { imageCacheRepository.clear() }
+            val musicBytes = withContext(Dispatchers.IO) { PlaybackCache.sizeBytes(appContext) }
+            uiState = uiState.copy(
+                cacheStats = CacheStatsState(
+                    musicBytes = musicBytes,
+                    imageBytes = 0L,
+                    loading = false
+                ),
+                message = "图片评论缓存已清除"
+            )
+        }
     }
 
     fun selectSource(sourceId: String) {
@@ -769,6 +835,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         val next = uiState.sourceSettings.update()
         uiState = uiState.copy(sourceSettings = next)
         sourceSettingsStore.save(next)
+        player.updateResolver(playbackResolver())
     }
 
     fun openPlaylist(playlist: MusicPlaylist) {
@@ -2882,6 +2949,52 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
                     playlistAddLoadingIds = uiState.playlistAddLoadingIds - playlist.id,
                     message = result.message
                 )
+            }
+        }
+    }
+
+    fun importPlaylistFromLink(input: String, saveToLocal: Boolean) {
+        val link = input.trim()
+        if (link.isBlank()) {
+            uiState = uiState.copy(message = "请粘贴公开歌单链接")
+            return
+        }
+        if (uiState.isPlaylistImporting) return
+        uiState = uiState.copy(
+            isPlaylistImporting = true,
+            message = "正在导入歌单..."
+        )
+        viewModelScope.launch {
+            val result = runCatching { playlistImportRepository.import(link) }
+                .getOrElse { error ->
+                    uiState = uiState.copy(
+                        isPlaylistImporting = false,
+                        message = "歌单导入失败：${error.message.orEmpty().ifBlank { "链接暂不可用" }}"
+                    )
+                    return@launch
+                }
+            val playlist = result.playlist
+            if (playlist == null) {
+                uiState = uiState.copy(
+                    isPlaylistImporting = false,
+                    message = result.message
+                )
+                return@launch
+            }
+            if (saveToLocal) {
+                val record = LocalPlaylistRecord(
+                    id = LocalPlaylistStore.newLocalPlaylistId(),
+                    title = playlist.title.ifBlank { "导入歌单" },
+                    songs = playlist.songs
+                )
+                saveLocalPlaylistRecords(localPlaylistRecords + record, message = result.message)
+                uiState = uiState.copy(isPlaylistImporting = false)
+            } else {
+                uiState = uiState.copy(
+                    isPlaylistImporting = false,
+                    message = result.message
+                )
+                openPlaylist(playlist)
             }
         }
     }

@@ -391,27 +391,24 @@ fun MiniPlayer(
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.Center
                 ) {
-                    Text(
-                        song?.title ?: "点击任意歌曲开始播放",
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        fontWeight = FontWeight.Black,
+                    MarqueeText(
+                        text = song?.title ?: "点击任意歌曲开始播放",
                         color = primaryText,
-                        style = MaterialTheme.typography.titleMedium
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Black,
+                        modifier = Modifier.fillMaxWidth()
                     )
-                    Text(
-                        if (playback.isPreparing) {
+                    MarqueeText(
+                        text = if (playback.isPreparing) {
                             "正在准备播放"
                         } else {
-                            listOf(song?.artist.orEmpty(), song?.album.orEmpty())
-                                .filter { it.isNotBlank() }
-                                .joinToString(" · ")
+                            song?.artist.orEmpty()
                                 .ifBlank { "播放器入口" }
                         },
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
                         color = secondaryText,
-                        style = MaterialTheme.typography.bodySmall
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = null,
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
                 IconButton(

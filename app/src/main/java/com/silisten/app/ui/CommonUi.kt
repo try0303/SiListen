@@ -67,6 +67,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
@@ -167,14 +168,16 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.composed
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
-import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
@@ -1142,29 +1145,43 @@ fun MarqueeText(
     var needsScroll by remember { mutableStateOf(false) }
     var textWidth by remember { mutableFloatStateOf(0f) }
     var containerWidth by remember { mutableFloatStateOf(0f) }
-    val scrollOffset = remember { androidx.compose.animation.core.Animatable(0f) }
+    val density = LocalDensity.current
+    val textMeasurer = rememberTextMeasurer()
+    val measuredStyle = remember(style, fontWeight) {
+        if (fontWeight == null) style else style.merge(TextStyle(fontWeight = fontWeight))
+    }
+    val scrollOffset = remember(text) { androidx.compose.animation.core.Animatable(0f) }
 
     LaunchedEffect(text) {
         scrollOffset.snapTo(0f)
-        needsScroll = false
     }
 
-    LaunchedEffect(needsScroll, textWidth, containerWidth) {
+    LaunchedEffect(text, measuredStyle, containerWidth) {
+        val measured = textMeasurer.measure(
+            text = AnnotatedString(text),
+            style = measuredStyle,
+            maxLines = 1,
+            softWrap = false
+        ).size.width.toFloat()
+        textWidth = measured
+        needsScroll = containerWidth > 0f && measured > containerWidth + 1f
+    }
+
+    val marqueeGap = 32.dp
+    val marqueeGapPx = with(density) { marqueeGap.toPx() }
+
+    LaunchedEffect(needsScroll, textWidth, containerWidth, marqueeGapPx) {
         if (!needsScroll || textWidth <= containerWidth) return@LaunchedEffect
-        val distance = textWidth - containerWidth + 40f
+        val distance = textWidth + marqueeGapPx
         while (true) {
-            delay(2000)
+            scrollOffset.snapTo(0f)
+            delay(1200)
             scrollOffset.animateTo(
                 targetValue = -distance,
                 animationSpec = tween(
-                    durationMillis = (distance * 18).toInt().coerceIn(2000, 8000),
+                    durationMillis = (distance * 18).toInt().coerceIn(2600, 12000),
                     easing = LinearEasing
                 )
-            )
-            delay(1500)
-            scrollOffset.animateTo(
-                targetValue = 0f,
-                animationSpec = tween(600)
             )
         }
     }
@@ -1175,23 +1192,50 @@ fun MarqueeText(
             .clipToBounds()
             .onSizeChanged { containerWidth = it.width.toFloat() }
     ) {
-        Text(
-            text = text,
-            color = color,
-            style = style,
-            fontWeight = fontWeight,
-            maxLines = 1,
-            softWrap = false,
-            overflow = TextOverflow.Visible,
-            onTextLayout = { result ->
-                val measured = result.size.width.toFloat()
-                textWidth = measured
-                needsScroll = result.hasVisualOverflow || measured > containerWidth
-            },
-            modifier = Modifier.graphicsLayer {
-                translationX = scrollOffset.value
+        val textModifier = with(density) {
+            if (textWidth > containerWidth && textWidth > 0f) {
+                Modifier.requiredWidth(textWidth.toDp())
+            } else {
+                Modifier.fillMaxWidth()
             }
-        )
+        }
+        if (needsScroll) {
+            Text(
+                text = text,
+                color = color,
+                style = measuredStyle,
+                fontWeight = fontWeight,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Visible,
+                modifier = textModifier.graphicsLayer {
+                    translationX = scrollOffset.value
+                }
+            )
+            Text(
+                text = text,
+                color = color,
+                style = measuredStyle,
+                fontWeight = fontWeight,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Visible,
+                modifier = textModifier.graphicsLayer {
+                    translationX = scrollOffset.value + textWidth + marqueeGapPx
+                }
+            )
+        } else {
+            Text(
+                text = text,
+                color = color,
+                style = measuredStyle,
+                fontWeight = fontWeight,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
     }
 }
 

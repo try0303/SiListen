@@ -695,6 +695,7 @@ class LxPlatformMusicSource(
         val id = playlist.rawCollectionId()
         if (id.isBlank()) return null
         return when (playlist.kind) {
+            PlaylistKind.Playlist -> kugouPlaylistDetail(playlist, id)
             PlaylistKind.Album -> {
                 val songs = kugouAlbumSongs(id, page = 1, limit = 80)
                 playlist.copy(songs = songs, coverUrl = playlist.coverUrl.ifBlank { songs.firstOrNull()?.coverUrl.orEmpty() })
@@ -725,6 +726,28 @@ class LxPlatformMusicSource(
             }
             else -> null
         }
+    }
+
+    private fun kugouPlaylistDetail(playlist: MusicPlaylist, id: String): MusicPlaylist? {
+        val html = getText(
+            "https://m.kugou.com/plist/list/${id.urlEncode()}?json=true",
+            headers = mapOf("User-Agent" to desktopUserAgent)
+        ) ?: return null
+        val songs = html.extractKugouPlaylistData().orEmpty()
+            .mapObjects { item -> item.toKugouDetailSong() }
+        val title = html.titleText()
+            .substringBefore("_")
+            .ifBlank { html.metaContent("keywords").substringBefore(',') }
+            .clean(defaultCollectionTitle(PlaylistKind.Playlist))
+        val description = html.metaContent("description").htmlEntityDecode()
+        return playlist.copy(
+            title = title.ifBlank { playlist.title },
+            subtitle = playlist.subtitle.ifBlank { platform.label },
+            description = description.ifBlank { playlist.description },
+            coverUrl = playlist.coverUrl.ifBlank { songs.firstOrNull()?.coverUrl.orEmpty() },
+            songs = songs,
+            songCount = songs.size
+        )
     }
 
     private fun kugouAlbumSongs(id: String, page: Int, limit: Int): List<Song> {
@@ -1593,6 +1616,51 @@ private fun String.htmlEntityDecode(): String =
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
+
+private fun String.extractKugouPlaylistData(): JSONArray? {
+    val markerIndex = indexOf("var data=")
+    if (markerIndex < 0) return null
+    val arrayStart = indexOf('[', startIndex = markerIndex)
+    if (arrayStart < 0) return null
+    var depth = 0
+    var inString = false
+    var escaping = false
+    for (index in arrayStart until length) {
+        val char = this[index]
+        if (inString) {
+            when {
+                escaping -> escaping = false
+                char == '\\' -> escaping = true
+                char == '"' -> inString = false
+            }
+        } else {
+            when (char) {
+                '"' -> inString = true
+                '[' -> depth += 1
+                ']' -> {
+                    depth -= 1
+                    if (depth == 0) {
+                        return runCatching { JSONArray(substring(arrayStart, index + 1)) }.getOrNull()
+                    }
+                }
+            }
+        }
+    }
+    return null
+}
+
+private fun String.metaContent(name: String): String {
+    val pattern = Regex(
+        """<meta\s+name=["']${Regex.escape(name)}["']\s+content=["']([^"']*)["']""",
+        setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+    )
+    return pattern.find(this)?.groupValues?.getOrNull(1).orEmpty().htmlEntityDecode()
+}
+
+private fun String.titleText(): String {
+    val pattern = Regex("""<title>(.*?)</title>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+    return pattern.find(this)?.groupValues?.getOrNull(1).orEmpty().htmlEntityDecode()
+}
 
 private const val fallbackArtworkUrl = "https://images.unsplash.com/photo-1516280440614-37939bbacd81?w=900"
 

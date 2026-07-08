@@ -1417,7 +1417,9 @@ fun SourcesScreen(
                     LocalPlaylistLibrarySection(
                         playlists = visibleLocalPlaylists,
                         dark = dark,
+                        importing = uiState.isPlaylistImporting,
                         onCreate = viewModel::createLocalPlaylist,
+                        onImportPlaylist = { link -> viewModel.importPlaylistFromLink(link, saveToLocal = true) },
                         onOpenPlaylist = viewModel::openPlaylist,
                         onDeletePlaylist = viewModel::deleteLocalPlaylist
                     )
@@ -1440,6 +1442,7 @@ fun AccountScreen(
     val user = state.loginState.user
     val context = LocalContext.current
     var loginMethod by remember { mutableStateOf(AccountLoginMethod.Sms) }
+    var showAccountImportDialog by remember { mutableStateOf(false) }
     val dark = uiState.themeSettings.resolveDarkTheme()
     val mutedText = if (dark) Color(0xFFB8C1B9) else Color(0xFF5F6368)
     val warningText = if (dark) Color(0xFFFFD166) else Color(0xFF8A5A00)
@@ -1501,7 +1504,17 @@ fun AccountScreen(
                 )
             }
             item {
-                SectionBulletTitle("我的歌单", dark = dark)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    SectionBulletTitle("我的歌单", dark = dark, modifier = Modifier.weight(1f))
+                    SecondaryActionButton(
+                        text = "导入",
+                        dark = dark,
+                        onClick = { showAccountImportDialog = true }
+                    )
+                }
             }
             recentPlayedPlaylist?.let { playlist ->
                 item(key = "recent-played") {
@@ -1616,17 +1629,32 @@ fun AccountScreen(
             }
         }
     }
+    if (showAccountImportDialog) {
+        PlaylistImportDialog(
+            title = "导入歌单",
+            importing = uiState.isPlaylistImporting,
+            dark = dark,
+            onDismiss = { showAccountImportDialog = false },
+            onImport = { link ->
+                viewModel.importPlaylistFromLink(link, saveToLocal = false)
+                showAccountImportDialog = false
+            }
+        )
+    }
 }
 
 @Composable
 private fun LocalPlaylistLibrarySection(
     playlists: List<MusicPlaylist>,
     dark: Boolean,
+    importing: Boolean,
     onCreate: (String) -> Unit,
+    onImportPlaylist: (String) -> Unit,
     onOpenPlaylist: (MusicPlaylist) -> Unit,
     onDeletePlaylist: (MusicPlaylist) -> Unit
 ) {
     var title by remember { mutableStateOf("") }
+    var showImportDialog by remember { mutableStateOf(false) }
     var pendingDeletePlaylist by remember { mutableStateOf<MusicPlaylist?>(null) }
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         SectionBulletTitle("本地歌单库", dark = dark)
@@ -1653,6 +1681,11 @@ private fun LocalPlaylistLibrarySection(
                 containerColor = MaterialTheme.colorScheme.primary,
                 contentColor = MaterialTheme.colorScheme.onPrimary
             )
+            SecondaryActionButton(
+                text = "导入",
+                dark = dark,
+                onClick = { showImportDialog = true }
+            )
         }
         if (playlists.isEmpty()) {
             EmptyStateCard(
@@ -1676,6 +1709,18 @@ private fun LocalPlaylistLibrarySection(
             }
         }
     }
+    if (showImportDialog) {
+        PlaylistImportDialog(
+            title = "导入到本地歌单库",
+            importing = importing,
+            dark = dark,
+            onDismiss = { showImportDialog = false },
+            onImport = { link ->
+                onImportPlaylist(link)
+                showImportDialog = false
+            }
+        )
+    }
     pendingDeletePlaylist?.let { playlist ->
         AlertDialog(
             onDismissRequest = { pendingDeletePlaylist = null },
@@ -1698,6 +1743,58 @@ private fun LocalPlaylistLibrarySection(
             }
         )
     }
+}
+
+@Composable
+private fun PlaylistImportDialog(
+    title: String,
+    importing: Boolean,
+    dark: Boolean,
+    onDismiss: () -> Unit,
+    onImport: (String) -> Unit
+) {
+    var link by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = {
+            if (!importing) onDismiss()
+        },
+        title = { Text(title) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "粘贴公开歌单链接，支持网易云、QQ 音乐、酷狗和咪咕。",
+                    color = if (dark) Color(0xFFB8C1B9) else Color(0xFF5F6368),
+                    style = MaterialTheme.typography.bodySmall
+                )
+                OutlinedTextField(
+                    value = link,
+                    onValueChange = { link = it },
+                    enabled = !importing,
+                    singleLine = false,
+                    minLines = 2,
+                    placeholder = { Text("https://...") },
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = link.isNotBlank() && !importing,
+                onClick = { onImport(link) }
+            ) {
+                Text(if (importing) "导入中" else "导入")
+            }
+        },
+        dismissButton = {
+            TextButton(
+                enabled = !importing,
+                onClick = onDismiss
+            ) {
+                Text("取消")
+            }
+        }
+    )
 }
 
 @Composable
@@ -2209,9 +2306,10 @@ private fun RowScope.AccountShortcutItem(
 @Composable
 private fun SectionBulletTitle(
     title: String,
-    dark: Boolean
+    dark: Boolean,
+    modifier: Modifier = Modifier
 ) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically) {
         Box(
             modifier = Modifier
                 .size(8.dp)

@@ -214,6 +214,7 @@ import com.kyant.backdrop.shadow.Shadow
 import com.qmdeve.liquidglass.widget.LiquidGlassView
 import com.silisten.app.AppTab
 import com.silisten.app.BuildConfig
+import com.silisten.app.CacheStatsState
 import com.silisten.app.LyricDisplayMode
 import com.silisten.app.PlaybackSettingsState
 import com.silisten.app.PlayerSheetPanel
@@ -306,6 +307,7 @@ fun SettingsScreen(
         SettingsRoute.Playback -> PlaybackSettingsScreen(
             playbackSettings = uiState.playbackSettings,
             themeSettings = uiState.themeSettings,
+            cacheStats = uiState.cacheStats,
             onBack = viewModel::closeThemeSettings,
             onQualityChange = viewModel::selectPlaybackQuality,
             onLyricDisplayModeChange = viewModel::selectLyricDisplayMode,
@@ -314,7 +316,10 @@ fun SettingsScreen(
             onStatusBarLyricOffsetChange = viewModel::setStatusBarLyricOffsetDp,
             onStatusBarLyricHorizontalChange = viewModel::setStatusBarLyricHorizontalPercent,
             onStatusBarLyricWidthChange = viewModel::setStatusBarLyricWidthPercent,
-            onStatusBarLyricColorChange = viewModel::setStatusBarLyricColorArgb
+            onStatusBarLyricColorChange = viewModel::setStatusBarLyricColorArgb,
+            onRefreshCacheStats = viewModel::refreshCacheStats,
+            onClearMusicCache = viewModel::clearMusicCache,
+            onClearImageCache = viewModel::clearImageCache
         )
         SettingsRoute.Source -> SourceSettingsScreen(
             uiState = uiState,
@@ -1019,6 +1024,7 @@ private fun saveDonationBitmapToPictures(context: Context, bitmap: Bitmap): Bool
 private fun PlaybackSettingsScreen(
     playbackSettings: PlaybackSettingsState,
     themeSettings: ThemeSettingsState,
+    cacheStats: CacheStatsState,
     onBack: () -> Unit,
     onQualityChange: (PlaybackQuality) -> Unit,
     onLyricDisplayModeChange: (LyricDisplayMode) -> Unit,
@@ -1027,7 +1033,10 @@ private fun PlaybackSettingsScreen(
     onStatusBarLyricOffsetChange: (Int) -> Unit,
     onStatusBarLyricHorizontalChange: (Float) -> Unit,
     onStatusBarLyricWidthChange: (Float) -> Unit,
-    onStatusBarLyricColorChange: (Long) -> Unit
+    onStatusBarLyricColorChange: (Long) -> Unit,
+    onRefreshCacheStats: () -> Unit,
+    onClearMusicCache: () -> Unit,
+    onClearImageCache: () -> Unit
 ) {
     val dark = themeSettings.resolveDarkTheme()
     val pageColor = if (dark) Color(0xFF050805) else Color(0xFFF6F6F8)
@@ -1151,6 +1160,33 @@ private fun PlaybackSettingsScreen(
                         ThemeDivider(dividerColor)
                     }
                 }
+            }
+        }
+        item {
+            ThemeSettingsGroup(containerColor = panelColor) {
+                CacheUsageItem(
+                    title = "音乐缓存",
+                    subtitle = "播放过的在线音频缓存，用于减少重复加载",
+                    mark = "音",
+                    sizeText = formatCacheBytes(cacheStats.musicBytes),
+                    loading = cacheStats.loading,
+                    textColor = titleColor,
+                    mutedColor = mutedColor,
+                    onRefresh = onRefreshCacheStats,
+                    onClear = onClearMusicCache
+                )
+                ThemeDivider(dividerColor)
+                CacheUsageItem(
+                    title = "图片评论缓存",
+                    subtitle = "封面、头像和评论图片缓存",
+                    mark = "图",
+                    sizeText = formatCacheBytes(cacheStats.imageBytes),
+                    loading = cacheStats.loading,
+                    textColor = titleColor,
+                    mutedColor = mutedColor,
+                    onRefresh = onRefreshCacheStats,
+                    onClear = onClearImageCache
+                )
             }
         }
         item {
@@ -2151,6 +2187,55 @@ private fun PlaybackQualityItem(
             SourceBadge("当前", MaterialTheme.colorScheme.primary)
         }
     }
+}
+
+@Composable
+private fun CacheUsageItem(
+    title: String,
+    subtitle: String,
+    mark: String,
+    sizeText: String,
+    loading: Boolean,
+    textColor: Color,
+    mutedColor: Color,
+    onRefresh: () -> Unit,
+    onClear: () -> Unit
+) {
+    Row(
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        ThemeRowMark(mark)
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, color = textColor, fontWeight = FontWeight.Bold)
+            Text(subtitle, color = mutedColor, style = MaterialTheme.typography.bodySmall)
+            Text(
+                text = if (loading) "正在统计..." else sizeText,
+                color = MaterialTheme.colorScheme.primary,
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Black,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        TextButton(onClick = onRefresh, enabled = !loading) {
+            Text("刷新")
+        }
+        TextButton(onClick = onClear, enabled = !loading) {
+            Text("清除")
+        }
+    }
+}
+
+private fun formatCacheBytes(bytes: Long): String {
+    val safeBytes = bytes.coerceAtLeast(0L)
+    if (safeBytes < 1024L) return "${safeBytes} B"
+    val kb = safeBytes / 1024.0
+    if (kb < 1024.0) return String.format(Locale.getDefault(), "%.1f KB", kb)
+    val mb = kb / 1024.0
+    if (mb < 1024.0) return String.format(Locale.getDefault(), "%.1f MB", mb)
+    return String.format(Locale.getDefault(), "%.2f GB", mb / 1024.0)
 }
 
 @Composable

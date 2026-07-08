@@ -146,11 +146,17 @@ class NeteaseMusicSource(
             }
         }
         val numericId = extractPlaylistNumericId(playlist)
+        var remoteTitle = ""
+        var remoteDescription = ""
+        var remoteCover = ""
         val songs = runCatching {
             val json = apiClient.getJson(
                 "/playlist/detail?id=${numericId.encode()}&timestamp=${System.currentTimeMillis()}"
             )
             val playlistJson = json.optJSONObject("playlist")
+            remoteTitle = playlistJson?.optString("name").cleanText()
+            remoteDescription = playlistJson?.optString("description").cleanText()
+            remoteCover = playlistJson?.optString("coverImgUrl").cleanText()
             val tracks = playlistJson?.optJSONArray("tracks").orEmpty().toSongs()
             val ids = playlistJson?.optJSONArray("trackIds").orEmpty().ids()
             if (ids.size > tracks.size) {
@@ -160,8 +166,10 @@ class NeteaseMusicSource(
             }
         }.getOrDefault(emptyList())
         playlist.copy(
+            title = remoteTitle.ifBlank { playlist.title },
             subtitle = if (songs.isEmpty()) playlist.subtitle else "${songs.size} 首歌曲",
-            coverUrl = playlist.coverUrl.ifBlank { songs.firstOrNull()?.coverUrl ?: defaultCover },
+            description = remoteDescription.ifBlank { playlist.description },
+            coverUrl = remoteCover.ifBlank { playlist.coverUrl }.ifBlank { songs.firstOrNull()?.coverUrl ?: defaultCover },
             songs = songs
         ).also {
             playlistCache[playlist.id] = CachedPlaylist(it, System.currentTimeMillis() + 5 * 60 * 1000)
