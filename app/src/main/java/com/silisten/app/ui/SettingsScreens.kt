@@ -1166,7 +1166,7 @@ private fun PlaybackSettingsScreen(
             ThemeSettingsGroup(containerColor = panelColor) {
                 CacheUsageItem(
                     title = "音乐缓存",
-                    subtitle = "播放过的在线音频缓存，用于减少重复加载",
+                    subtitle = "已完整下载的歌曲文件，命中后可离线播放，无需再次解析地址",
                     mark = "音",
                     sizeText = formatCacheBytes(cacheStats.musicBytes),
                     loading = cacheStats.loading,

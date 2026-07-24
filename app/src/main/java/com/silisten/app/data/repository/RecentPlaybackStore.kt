@@ -13,7 +13,7 @@ class RecentPlaybackStore(context: Context) {
 
     fun load(): List<Song> {
         val raw = preferences.getString(KEY_RECENT_PLAYED, null) ?: return emptyList()
-        return runCatching {
+        val loaded = runCatching {
             val array = JSONArray(raw)
             buildList {
                 for (index in 0 until array.length()) {
@@ -21,11 +21,18 @@ class RecentPlaybackStore(context: Context) {
                 }
             }.distinctBy { it.id }.take(MAX_ITEMS)
         }.getOrDefault(emptyList())
+        // Old Netease search used to inject 4 hardcoded seed songs with a Unsplash placeholder
+        // cover when offline. Scrub them so "最近播放" no longer looks polluted.
+        val cleaned = loaded.filterNot { it.isLegacyFakeSeedSong() }
+        if (cleaned.size != loaded.size) {
+            save(cleaned)
+        }
+        return cleaned
     }
 
     fun save(songs: List<Song>) {
         val array = JSONArray()
-        songs.take(MAX_ITEMS).forEach { song ->
+        songs.filterNot { it.isLegacyFakeSeedSong() }.take(MAX_ITEMS).forEach { song ->
             array.put(
                 JSONObject()
                     .put("id", song.id)
@@ -61,5 +68,20 @@ class RecentPlaybackStore(context: Context) {
     companion object {
         const val MAX_ITEMS = 50
         private const val KEY_RECENT_PLAYED = "recent_played_songs"
+
+        // Hardcoded IDs previously returned by NeteaseMusicSource.seedSongs().
+        private val LEGACY_FAKE_SEED_IDS = setOf(
+            "33894312",   // 起风了
+            "1901371647", // 哪里都是你
+            "1827600686", // 删了吧
+            "26259003"    // 海阔天空
+        )
+        private const val LEGACY_SEED_PLACEHOLDER_MARKER = "photo-1516280440614-37939bbacd81"
+
+        private fun Song.isLegacyFakeSeedSong(): Boolean {
+            if (id !in LEGACY_FAKE_SEED_IDS) return false
+            // Real plays of the same song IDs keep a music.126.net cover; seed rows used Unsplash.
+            return coverUrl.isBlank() || coverUrl.contains(LEGACY_SEED_PLACEHOLDER_MARKER)
+        }
     }
 }

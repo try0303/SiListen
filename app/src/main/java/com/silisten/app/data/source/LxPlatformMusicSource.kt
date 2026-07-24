@@ -67,7 +67,10 @@ class LxPlatformMusicSource(
                     else -> emptyList()
                 }
             }.getOrDefault(emptyList())
-            songSearchCache[cacheKey] = CachedSongs(songs, cacheTtl(songs))
+            // Skip caching empty misses so offline → online can recover immediately.
+            if (songs.isNotEmpty()) {
+                songSearchCache[cacheKey] = CachedSongs(songs, cacheTtl(songs))
+            }
             songs
         }
 
@@ -318,7 +321,9 @@ class LxPlatformMusicSource(
         val cacheKey = "artwork-v3:$category:${query.cacheKey()}:$safeLimit:$page"
         collectionSearchCache[cacheKey]?.takeIfFresh()?.let { return@withContext it }
         val collections = runCatching { block(query, page, safeLimit) }.getOrDefault(emptyList())
-        collectionSearchCache[cacheKey] = CachedCollections(collections, cacheTtl(collections))
+        if (collections.isNotEmpty()) {
+            collectionSearchCache[cacheKey] = CachedCollections(collections, cacheTtl(collections))
+        }
         collections
     }
 

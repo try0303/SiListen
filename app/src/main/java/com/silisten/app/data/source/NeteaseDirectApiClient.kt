@@ -32,34 +32,39 @@ internal class NeteaseDirectApiClient(
 
     private fun ensureDeviceCookies() {
         val useAndroidProfile = cookieJar.cookieValue("os") != "android" ||
-            cookieJar.cookieValue("mobilename") != "SiListen"
+            cookieJar.cookieValue("appver") == null ||
+            cookieJar.cookieValue("deviceId") == null
         if (useAndroidProfile) {
+            // Keep MUSIC_U / MUSIC_A if already logged in; only refresh device profile cookies.
             cookieJar.removeCookies(
                 setOf(
-                    "__remember_me",
-                    "ntes_kaola_ad",
-                    "_ntes_nuid",
-                    "_ntes_nnid",
-                    "WNMCID",
-                    "WEVNSM"
+                    "os",
+                    "appver",
+                    "versioncode",
+                    "mobilename",
+                    "osver",
+                    "resolution",
+                    "channel",
+                    "buildver"
                 )
             )
         }
         val deviceId = cookieJar.cookieValue("deviceId")
-            ?: "SiListen_" + java.util.UUID.randomUUID().toString().replace("-", "").take(16)
+            ?: java.util.UUID.randomUUID().toString().replace("-", "").lowercase()
         val defaults = mapOf(
             "os" to "android",
-            "appver" to "9.1.72",
-            "versioncode" to "250",
-            "mobilename" to "SiListen",
+            "appver" to "8.20.20",
+            "versioncode" to "220",
+            "mobilename" to "Pixel 7",
             "osver" to "14",
             "resolution" to "1080x2400",
             "deviceId" to deviceId,
-            "channel" to "netease"
+            "channel" to "netease",
+            "buildver" to (System.currentTimeMillis() / 1000).toString()
         )
         val existing = mutableMapOf<String, String>()
         defaults.forEach { (k, v) ->
-            if (useAndroidProfile || cookieJar.cookieValue(k) == null) {
+            if (cookieJar.cookieValue(k) == null) {
                 existing[k] = v
             }
         }
@@ -81,25 +86,65 @@ internal class NeteaseDirectApiClient(
         if (pathAndQuery.startsWith("http")) unsupported(pathAndQuery)
         val request = DirectRequest.from(pathAndQuery)
         return when (request.path) {
-            "/captcha/sent" -> postWeApi(
-                "/weapi/sms/captcha/sent",
-                mapOf(
-                    "cellphone" to request.param("phone"),
-                    "ctcode" to request.param("ctcode", "86")
-                )
-            )
+            "/captcha/sent" -> {
+                // Prefer Android eapi path; fall back to weapi if needed.
+                runCatching {
+                    postEApi(
+                        requestPath = "/eapi/sms/captcha/sent",
+                        encryptPath = "/api/sms/captcha/sent",
+                        data = mapOf(
+                            "cellphone" to request.param("phone"),
+                            "ctcode" to request.param("ctcode", "86")
+                        )
+                    )
+                }.getOrElse {
+                    postWeApi(
+                        "/weapi/sms/captcha/sent",
+                        mapOf(
+                            "cellphone" to request.param("phone"),
+                            "ctcode" to request.param("ctcode", "86")
+                        )
+                    )
+                }
+            }
 
-            "/login/cellphone" -> postWeApi(
-                "/weapi/w/login/cellphone",
-                mapOf(
-                    "phone" to request.param("phone"),
-                    "captcha" to request.param("captcha"),
-                    "countrycode" to request.param("ctcode", "86"),
-                    "clientType" to "android",
-                    "rememberLogin" to true,
-                    "https" to true
+            "/login/cellphone" -> {
+                // Android official-style eapi login first; weapi as fallback.
+                val phone = request.param("phone")
+                val captcha = request.param("captcha")
+                val country = request.param("ctcode", "86")
+                val eapiBody = mapOf(
+                    "phone" to phone,
+                    "countrycode" to country,
+                    "captcha" to captcha,
+                    "rememberLogin" to "true",
+                    "https" to "true"
                 )
-            )
+                val eapiText = runCatching {
+                    postEApi(
+                        requestPath = "/eapi/w/login/cellphone",
+                        encryptPath = "/api/w/login/cellphone",
+                        data = eapiBody
+                    )
+                }.getOrNull()
+                if (eapiText != null) {
+                    val eapiCode = runCatching { JSONObject(eapiText).optInt("code", -1) }.getOrDefault(-1)
+                    // Prefer success, and only fall back when eapi is clearly unsupported.
+                    if (eapiCode == 200 || eapiCode == -462 || eapiCode in setOf(400, 501, 502, 503, 505, 10004)) {
+                        return eapiText
+                    }
+                }
+                postWeApi(
+                    "/weapi/w/login/cellphone",
+                    mapOf(
+                        "phone" to phone,
+                        "captcha" to captcha,
+                        "countrycode" to country,
+                        "rememberLogin" to true,
+                        "https" to true
+                    )
+                )
+            }
 
             "/login/qr/key" -> postWeApi(
                 "/weapi/login/qrcode/unikey",
@@ -351,7 +396,7 @@ internal class NeteaseDirectApiClient(
             "cursor" to request.param("cursor", "-1")
         )
 
-    private fun postWeApi(apiPath: String, data: Map<String, Any?>): String {
+    private fun postWeApi(apiPath: String, data: Map<String, Any?>, preferAndroid: Boolean = false): String {
         val payload = JSONObject()
         data.forEach { (key, value) -> payload.put(key, value.toJsonValue()) }
         val csrf = cookieJar.cookieValue("__csrf").orEmpty()
@@ -360,9 +405,10 @@ internal class NeteaseDirectApiClient(
         }
         val encrypted = NeteaseCrypto.weApi(payload.toString())
         val separator = if (apiPath.contains("?")) "&" else "?"
+        val authPath = apiPath.contains("login") || apiPath.contains("captcha") || apiPath.contains("sms")
         val request = Request.Builder()
             .url("$MUSIC_URL$apiPath${separator}csrf_token=${csrf.encodeQuery()}")
-            .headers(commonHeaders())
+            .headers(commonHeaders(preferAndroid = preferAndroid || authPath))
             .post(
                 FormBody.Builder()
                     .addEncoded("params", encrypted.params)
@@ -383,33 +429,34 @@ internal class NeteaseDirectApiClient(
         payload.put("header", JSONObject(eApiHeader()))
         val encrypted = NeteaseCrypto.eApi(encryptPath, payload.toString())
         val body = "params=${encrypted.params}".toRequestBody(FORM_MEDIA_TYPE)
+        val authPath = requestPath.contains("login") || requestPath.contains("captcha") || requestPath.contains("sms")
         val request = Request.Builder()
             .url("$INTERFACE_URL$requestPath")
-            .headers(commonHeaders())
+            .headers(commonHeaders(preferAndroid = authPath))
             .post(body)
             .build()
         return execute(request)
     }
 
     private fun eApiHeader(): Map<String, Any?> = mapOf(
-        "osver" to cookieJar.cookieValue("osver"),
+        "osver" to (cookieJar.cookieValue("osver") ?: "14"),
         "deviceId" to cookieJar.cookieValue("deviceId"),
-        "appver" to (cookieJar.cookieValue("appver") ?: "8.0.00"),
-        "versioncode" to (cookieJar.cookieValue("versioncode") ?: "140"),
-        "mobilename" to cookieJar.cookieValue("mobilename"),
-        "buildver" to (System.currentTimeMillis() / 1000).toString(),
-        "resolution" to (cookieJar.cookieValue("resolution") ?: "1920x1080"),
+        "appver" to (cookieJar.cookieValue("appver") ?: "8.20.20"),
+        "versioncode" to (cookieJar.cookieValue("versioncode") ?: "220"),
+        "mobilename" to (cookieJar.cookieValue("mobilename") ?: "Pixel 7"),
+        "buildver" to (cookieJar.cookieValue("buildver") ?: (System.currentTimeMillis() / 1000).toString()),
+        "resolution" to (cookieJar.cookieValue("resolution") ?: "1080x2400"),
         "os" to (cookieJar.cookieValue("os") ?: "android"),
-        "channel" to cookieJar.cookieValue("channel"),
+        "channel" to (cookieJar.cookieValue("channel") ?: "netease"),
         "__csrf" to cookieJar.cookieValue("__csrf").orEmpty(),
         "MUSIC_U" to cookieJar.cookieValue("MUSIC_U"),
         "MUSIC_A" to cookieJar.cookieValue("MUSIC_A"),
         "requestId" to "${System.currentTimeMillis()}${(0..9999).random().toString().padStart(4, '0')}"
     )
 
-    private fun commonHeaders() = okhttp3.Headers.Builder()
-        .add("User-Agent", USER_AGENTS.random())
-        .add("Referer", INTERFACE_URL)
+    private fun commonHeaders(preferAndroid: Boolean = false) = okhttp3.Headers.Builder()
+        .add("User-Agent", if (preferAndroid) ANDROID_USER_AGENT else USER_AGENTS.random())
+        .add("Referer", MUSIC_URL)
         .add("Origin", MUSIC_URL)
         .build()
 
@@ -477,8 +524,10 @@ internal class NeteaseDirectApiClient(
         private const val MUSIC_URL = "https://music.163.com"
         private const val INTERFACE_URL = "https://interface.music.163.com"
         private val FORM_MEDIA_TYPE = "application/x-www-form-urlencoded".toMediaType()
+        private const val ANDROID_USER_AGENT =
+            "NeteaseMusic/8.20.20.220002 (Pixel 7;android 14)"
         private val USER_AGENTS = listOf(
-            "Mozilla/5.0 (Linux; Android 13; SiListen) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36",
+            "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36",
             "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
         )

@@ -22,8 +22,9 @@ class MusicSourceRegistry(private val sources: List<MusicSource>) {
                 LxPlatformMusicSource.kugou(),
                 LxPlatformMusicSource.qq(),
                 LxPlatformMusicSource.migu(),
-                LocalMusicSource(),
-                DemoMusicSource()
+                LocalMusicSource()
+                // DemoMusicSource is offline sample audio only; keep it out of production registry
+                // so search / default fallback never surface fake catalog rows.
             )
         )
     }

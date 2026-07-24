@@ -1,5 +1,6 @@
 package com.silisten.app.data.repository
 
+import android.content.Context
 import com.silisten.app.data.model.LyricLine
 import com.silisten.app.data.model.CustomSourceConfig
 import com.silisten.app.data.model.MusicPlaylist
@@ -25,18 +26,26 @@ import com.silisten.app.data.source.NeteaseMusicSource
 import com.silisten.app.data.source.PagedMusicSearchSource
 import com.silisten.app.data.source.SongCommentSource
 import com.silisten.app.data.source.SongCommentReplySource
+import com.silisten.app.playback.SongFileCache
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
 
 class MusicRepository(
     val registry: MusicSourceRegistry,
     private val customPlaybackSourceClient: CustomPlaybackSourceClient,
+    private val appContext: Context,
     private val playbackQualityProvider: () -> PlaybackQuality = { PlaybackQuality.ExHigh }
 ) {
+    private val cacheScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     fun sources(): List<MusicSource> = registry.all()
 
     fun source(sourceId: String): MusicSource = registry.byId(sourceId)
@@ -63,12 +72,14 @@ class MusicRepository(
         sourceId: String,
         query: String,
         sourceSettings: SourceSettingsState? = null
-    ): List<Song> =
-        if (sourceId == SourcePlatformIds.ALL) {
+    ): List<Song> {
+        val songs = if (sourceId == SourcePlatformIds.ALL) {
             searchSongsAcrossEnabledSources(query, 30, 0, sourceSettings)
         } else {
             source(sourceId).search(query)
         }
+        return rankSongsForQuery(query, songs)
+    }
 
     suspend fun searchSongs(
         sourceId: String,
@@ -81,13 +92,15 @@ class MusicRepository(
             return searchSongsAcrossEnabledSources(query, limit, offset, sourceSettings)
         }
         val source = source(sourceId)
-        return if (source is PagedMusicSearchSource) {
+        val songs = if (source is PagedMusicSearchSource) {
             withTimeoutOrNull(SINGLE_SOURCE_SEARCH_TIMEOUT_MS) {
                 source.searchSongs(query, limit, offset)
             }.orEmpty()
         } else {
             if (offset == 0) source.search(query).take(limit) else emptyList()
         }
+        // Keep page stability for offset > 0; still prefer original cuts within the page.
+        return rankSongsForQuery(query, songs)
     }
 
     suspend fun matchNeteaseIdentity(song: Song): Song? {
@@ -185,16 +198,36 @@ class MusicRepository(
         song: Song,
         sourceSettings: SourceSettingsState
     ): Pair<Song, String>? {
-        song.streamHint?.takeIf { it.isNotBlank() }?.let { return song to it }
+        val quality = playbackQualityProvider()
+
+        // 1) True complete song-file cache: play offline without re-resolving remote URLs.
+        SongFileCache.findFile(appContext, song, quality)?.let { file ->
+            return song to SongFileCache.playbackUri(file)
+        }
+
+        // 2) Local / explicit stream hints (file, content, or ready HTTP).
+        song.streamHint
+            ?.takeIf { it.isPlayableStreamUrl() }
+            ?.let { hint ->
+                persistResolvedStream(song, quality, hint)
+                return song to hint
+            }
+
+        if (song.sourceId == SourcePlatformIds.LOCAL) {
+            return null
+        }
 
         val shouldPreferCustomSource =
             sourceSettings.autoSourceFallbackEnabled &&
-                song.sourceId != SourcePlatformIds.LOCAL &&
                 sourceSettings.customSources.any { it.enabled }
         if (shouldPreferCustomSource) {
-            resolveByCustomSources(song, sourceSettings)?.let { return it }
+            resolveByCustomSources(song, sourceSettings)?.let { resolved ->
+                persistResolvedStream(resolved.first, quality, resolved.second)
+                return resolved
+            }
         }
 
+        // 3) Official / built-in source stream.
         val directUrl = resolveDirectStream(song)
         if (!directUrl.isNullOrBlank()) {
             val resolvedIdentitySong = if (song.neteaseIdentityId().isNullOrBlank()) {
@@ -202,14 +235,39 @@ class MusicRepository(
             } else {
                 song
             }
+            persistResolvedStream(resolvedIdentitySong, quality, directUrl)
             return resolvedIdentitySong to directUrl
         }
 
-        if (!sourceSettings.autoSourceFallbackEnabled || song.sourceId == SourcePlatformIds.LOCAL) {
+        if (!sourceSettings.autoSourceFallbackEnabled) {
             return null
         }
 
-        return resolveByCustomSources(song, sourceSettings)
+        // 4) Custom playback sources as fallback.
+        resolveByCustomSources(song, sourceSettings)?.let { resolved ->
+            persistResolvedStream(resolved.first, quality, resolved.second)
+            return resolved
+        }
+
+        // 5) Cross-platform title/artist match (was dead code before).
+        for (candidateSourceId in PLATFORM_FALLBACK_ORDER) {
+            if (candidateSourceId == song.sourceId) continue
+            resolveByPlatformMatch(song, candidateSourceId)?.let { resolved ->
+                persistResolvedStream(resolved.first, quality, resolved.second)
+                return resolved
+            }
+        }
+
+        return null
+    }
+
+    private fun persistResolvedStream(song: Song, quality: PlaybackQuality, streamUrl: String) {
+        if (!streamUrl.startsWith("http://") && !streamUrl.startsWith("https://")) return
+        cacheScope.launch {
+            runCatching {
+                SongFileCache.ensureDownloaded(appContext, song, quality, streamUrl)
+            }
+        }
     }
 
     private suspend fun resolveByCustomSources(
@@ -218,6 +276,7 @@ class MusicRepository(
     ): Pair<Song, String>? {
         for (customSource in sourceSettings.customSources.filter { it.enabled }.distinctBy { it.endpoint.trim() }) {
             val url = customPlaybackSourceClient.resolvePlayUrl(song, customSource, playbackQualityProvider())
+                ?.takeIf { it.isPlayableStreamUrl() }
             if (!url.isNullOrBlank()) {
                 val identitySong = if (song.neteaseIdentityId().isNullOrBlank()) {
                     runCatching { matchNeteaseIdentity(song) }.getOrNull() ?: song
@@ -396,10 +455,10 @@ class MusicRepository(
                     }
                 }
             }
-            searchJobs.awaitAll()
+            val merged = searchJobs.awaitAll()
                 .interleave()
                 .distinctBy { "${it.sourceId}:${it.id}" }
-                .take(limit)
+            rankSongsForQuery(query, merged).take(limit)
         }
     }
 
@@ -672,13 +731,109 @@ class MusicRepository(
             }
         }
 
+        score += coverVersionPenalty(candidate)
         return score.coerceIn(0, 100)
     }
 
-    private fun String.isPlayableStreamUrl(): Boolean =
-        isNotBlank() &&
-            (startsWith("http://") || startsWith("https://")) &&
+    private fun rankSongsForQuery(query: String, songs: List<Song>): List<Song> {
+        if (songs.size <= 1) return songs
+        return songs
+            .mapIndexed { index, song -> Triple(song, searchRelevanceScore(query, song), index) }
+            .sortedWith(
+                compareByDescending<Triple<Song, Int, Int>> { it.second }
+                    .thenBy { it.third }
+            )
+            .map { it.first }
+    }
+
+    private fun searchRelevanceScore(query: String, song: Song): Int {
+        val rawQuery = query.trim()
+        if (rawQuery.isBlank()) return coverVersionPenalty(song)
+
+        val q = rawQuery.normalizedMusicText()
+        val title = song.title.normalizedMusicText()
+        val artist = song.artist.normalizedMusicText()
+        val album = song.album.normalizedMusicText()
+        val queryTokens = rawQuery.lowercase()
+            .split(Regex("[\\s/&、,，;；]+"))
+            .map { it.trim() }
+            .filter { it.length >= 2 }
+            .map { it.normalizedMusicText() }
+            .filter { it.isNotBlank() }
+            .distinct()
+
+        var score = 0
+        when {
+            title == q -> score += 100
+            title.startsWith(q) || q.startsWith(title) -> score += 82
+            title.contains(q) || q.contains(title) -> score += 60
+            queryTokens.any { it.isNotBlank() && title.contains(it) } -> score += 36
+        }
+
+        if (artist.isNotBlank()) {
+            when {
+                artist == q || q.contains(artist) -> score += 48
+                artist.contains(q) -> score += 28
+                queryTokens.any { token ->
+                    token.isNotBlank() && (
+                        artist == token ||
+                            artist.contains(token) ||
+                            token.contains(artist)
+                        )
+                } -> score += 40
+            }
+        }
+
+        // Prefer "title + original artist" style matches over loose partial hits.
+        if (title.isNotBlank() && artist.isNotBlank()) {
+            val titleHit = title == q || q.contains(title) || title.contains(q)
+            val artistHit = queryTokens.any { token ->
+                artist == token || artist.contains(token) || token.contains(artist)
+            } || q.contains(artist)
+            if (titleHit && artistHit) score += 55
+        }
+
+        if (album.isNotBlank() && (album == q || q.contains(album) || album.contains(q))) {
+            score += 8
+        }
+
+        score += coverVersionPenalty(song)
+        score += when (song.sourceId) {
+            SourcePlatformIds.NETEASE -> 4
+            SourcePlatformIds.QQ -> 3
+            SourcePlatformIds.KUGOU -> 2
+            SourcePlatformIds.KUWO -> 2
+            SourcePlatformIds.MIGU -> 1
+            else -> 0
+        }
+        return score
+    }
+
+    private fun coverVersionPenalty(song: Song): Int {
+        val blob = listOf(song.title, song.artist, song.album)
+            .joinToString(" ")
+            .lowercase()
+        var penalty = 0
+        if (Regex("翻唱|cover|翻自|翻版|翻录").containsMatchIn(blob)) penalty -= 45
+        if (Regex("伴奏|instrumental|karaoke|消音|off vocal").containsMatchIn(blob)) penalty -= 40
+        if (Regex("\\blive\\b|现场|演唱会|音乐会").containsMatchIn(blob)) penalty -= 28
+        if (Regex("remix|混音|dj|夜店|加速|剪辑|片段").containsMatchIn(blob)) penalty -= 22
+        if (Regex("纯音乐|钢琴版|吉他版|小提琴").containsMatchIn(blob) &&
+            !song.title.normalizedMusicText().contains("纯音乐")
+        ) {
+            penalty -= 12
+        }
+        return penalty
+    }
+
+    private fun String.isPlayableStreamUrl(): Boolean {
+        if (isBlank()) return false
+        if (startsWith("file:", ignoreCase = true) || startsWith("content:", ignoreCase = true)) {
+            return true
+        }
+        return (startsWith("http://") || startsWith("https://")) &&
             !contains("music.163.com/song/media/outer/url", ignoreCase = true)
+    }
 
     private fun String.normalizedMusicText(): String =
         lowercase()
@@ -707,6 +862,13 @@ class MusicRepository(
             SourcePlatformIds.KUWO,
             SourcePlatformIds.KUGOU,
             SourcePlatformIds.QQ,
+            SourcePlatformIds.MIGU
+        )
+        val PLATFORM_FALLBACK_ORDER = listOf(
+            SourcePlatformIds.NETEASE,
+            SourcePlatformIds.QQ,
+            SourcePlatformIds.KUGOU,
+            SourcePlatformIds.KUWO,
             SourcePlatformIds.MIGU
         )
     }

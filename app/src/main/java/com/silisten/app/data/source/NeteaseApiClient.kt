@@ -62,7 +62,12 @@ class NeteaseApiClient(context: Context) {
             message = if (success) {
                 "验证码已发送，请留意网易云短信"
             } else {
-                shortError(json.cleanMessage("验证码发送失败，可能触发了网易云风控"))
+                val code = json.optInt("code", -1)
+                if (code == -462) {
+                    "网易云触发了安全验证，短信暂时不可用，请改用扫码登录"
+                } else {
+                    shortError(json.cleanMessage("验证码发送失败，可能触发了网易云风控"))
+                }
             }
         )
     }
@@ -339,27 +344,50 @@ class NeteaseApiClient(context: Context) {
     private fun JSONObject.loginFailureMessage(code: Int): String {
         val serverMessage = cleanMessage("")
         return when (code) {
-            -462 -> serverMessage.ifBlank { "网易云要求完成安全验证，请重新获取验证码或稍后再试" }
-            10004 -> serverMessage.ifBlank { "当前登录存在安全风险，请稍后再试" }
-            400, 502 -> serverMessage.ifBlank { "登录请求被网易云拒绝，请重新获取验证码后再试" }
-            501 -> serverMessage.ifBlank { "手机号未注册或暂不支持该账号登录" }
-            503 -> serverMessage.ifBlank { "验证码错误或已过期，请重新获取验证码" }
-            505 -> serverMessage.ifBlank { "账号存在安全限制，请在网易云音乐官方 App 处理后再试" }
-            else -> serverMessage.ifBlank { "登录失败，网易云返回状态码 $code，请重新获取验证码后再试" }
+            -462 -> "网易云触发了安全验证，短信登录被拦截。请改用下方扫码登录，或稍后再试"
+            10004 -> humanizeServerMessage(serverMessage)
+                .ifBlank { "当前登录存在安全风险，请改用扫码登录或稍后再试" }
+            400, 502 -> humanizeServerMessage(serverMessage)
+                .ifBlank { "登录请求被网易云拒绝，请重新获取验证码后再试" }
+            501 -> humanizeServerMessage(serverMessage)
+                .ifBlank { "手机号未注册或暂不支持该账号登录" }
+            503 -> humanizeServerMessage(serverMessage)
+                .ifBlank { "验证码错误或已过期，请重新获取验证码" }
+            505 -> humanizeServerMessage(serverMessage)
+                .ifBlank { "账号存在安全限制，请在网易云音乐官方 App 处理后再试" }
+            else -> humanizeServerMessage(serverMessage)
+                .ifBlank { "登录失败，网易云返回状态码 $code，请重新获取验证码后再试" }
+        }
+    }
+
+    private fun humanizeServerMessage(message: String): String {
+        val cleaned = message.replace(Regex("\\s+"), " ").trim()
+        if (cleaned.isBlank()) return ""
+        val lower = cleaned.lowercase()
+        return when {
+            lower.contains("encrypt-pages") ||
+                lower.contains("st.music.163.com") ||
+                lower.startsWith("http://") ||
+                lower.startsWith("https://") ->
+                "网易云触发了安全验证，短信登录被拦截。请改用扫码登录"
+            cleaned.contains("验证码") || cleaned.contains("captcha", ignoreCase = true) -> cleaned
+            cleaned.length > 48 -> cleaned.take(48) + "..."
+            else -> cleaned
         }
     }
 
     private fun shortError(message: String): String {
         val cleaned = message.replace(Regex("\\s+"), " ").trim()
+        val humanized = humanizeServerMessage(cleaned).ifBlank { cleaned }
         return when {
-            cleaned.isBlank() || cleaned.equals("null", ignoreCase = true) -> "请求失败，请稍后重试"
-            cleaned.contains("failed to connect", ignoreCase = true) ||
-                cleaned.contains("connection refused", ignoreCase = true) ->
+            humanized.isBlank() || humanized.equals("null", ignoreCase = true) -> "请求失败，请稍后重试"
+            humanized.contains("failed to connect", ignoreCase = true) ||
+                humanized.contains("connection refused", ignoreCase = true) ->
                 "网易云接口连接失败，请检查网络后重试"
-            cleaned.contains("timeout", ignoreCase = true) ->
+            humanized.contains("timeout", ignoreCase = true) ->
                 "网易云接口响应超时，请稍后重试"
-            cleaned.length > 34 -> cleaned.take(34) + "..."
-            else -> cleaned
+            humanized.length > 48 -> humanized.take(48) + "..."
+            else -> humanized
         }
     }
 

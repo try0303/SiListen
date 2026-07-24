@@ -63,6 +63,7 @@ class LyricOverlayService : Service() {
     private var lastText = ""
     private var lastIsPlaying = false
     private var lastLyricProgress = 0f
+    private var lastLyricDurationMs = 4_000L
     private var statusOffsetDp = 0
     private var statusHorizontalPercent = 0f
     private var statusWidthPercent = 1f
@@ -95,6 +96,7 @@ class LyricOverlayService : Service() {
         lastArtist = intent?.getStringExtra(EXTRA_ARTIST).orEmpty()
         lastIsPlaying = intent?.getBooleanExtra(EXTRA_IS_PLAYING, false) == true
         lastLyricProgress = intent?.getFloatExtra(EXTRA_LYRIC_PROGRESS, 0f)?.coerceIn(0f, 1f) ?: 0f
+        lastLyricDurationMs = intent?.getLongExtra(EXTRA_LYRIC_DURATION_MS, 4_000L)?.coerceAtLeast(800L) ?: 4_000L
         lastText = desktopText
         statusOffsetDp = intent?.getIntExtra(EXTRA_STATUS_OFFSET_DP, 0)?.coerceIn(0, 120) ?: 0
         statusHorizontalPercent = intent?.getFloatExtra(EXTRA_STATUS_HORIZONTAL_PERCENT, 0f)?.coerceIn(-1f, 1f) ?: 0f
@@ -108,7 +110,12 @@ class LyricOverlayService : Service() {
             return START_NOT_STICKY
         }
 
-        renderStatusLyric(statusEnabled, statusText.ifBlank { desktopText.lineSequence().firstOrNull()?.trim().orEmpty() })
+        // NetEase-like: status-bar lyric only while playing; keep it during frame adjust preview.
+        val statusVisible = statusEnabled && (lastIsPlaying || statusFrameVisible)
+        renderStatusLyric(
+            enabled = statusVisible,
+            text = statusText.ifBlank { desktopText.lineSequence().firstOrNull()?.trim().orEmpty() }
+        )
         renderDesktopLyric(desktopEnabled && lastIsPlaying)
         return START_STICKY
     }
@@ -132,26 +139,40 @@ class LyricOverlayService : Service() {
             windowManager.addView(this, statusLayoutParams())
         }
         view.background = statusBackground()
-        view.setLyric(text, statusTextColorArgb)
+        view.setLyric(text, statusTextColorArgb, statusFrameVisible)
         runCatching { windowManager.updateViewLayout(view, statusLayoutParams()) }
     }
 
     private class StatusLyricView(context: Context) : View(context) {
         private val density = resources.displayMetrics.density
-        private val horizontalPadding = dp(14)
-        private val verticalPadding = dp(0)
-        private val repeatGap = dp(56).toFloat()
+        // NetEase status lyric: compact strip, transparent play mode, thin adjust frame only.
+        private val horizontalPadding = dp(8)
+        private val verticalPadding = dp(1)
+        private val repeatGap = dp(48).toFloat()
+        private val framePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = dp(1).toFloat().coerceAtLeast(1f)
+            color = Color.argb(210, 255, 255, 255)
+        }
+        private val frameFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+            // Only used while adjusting; keep very light so it doesn't look like a fat capsule.
+            color = Color.argb(28, 0, 0, 0)
+        }
+        private val frameRect = RectF()
         private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
-            textSize = sp(12.5f)
-            typeface = Typeface.DEFAULT_BOLD
+            // NetEase status lyric is small medium text with soft shadow, no dark pill.
+            textSize = sp(11f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             color = Color.WHITE
-            setShadowLayer(dp(5).toFloat(), 0f, dp(1).toFloat(), Color.argb(190, 0, 0, 0))
+            setShadowLayer(dp(3).toFloat(), 0f, 0.5f * density, Color.argb(200, 0, 0, 0))
         }
         private var lyric = ""
         private var lyricWidth = 0f
         private var textChangedAt = SystemClock.uptimeMillis()
+        private var frameVisible = false
 
-        fun setLyric(text: String, color: Int) {
+        fun setLyric(text: String, color: Int, showFrame: Boolean) {
             val nextText = text.ifBlank { " " }
             if (lyric != nextText) {
                 lyric = nextText
@@ -161,6 +182,7 @@ class LyricOverlayService : Service() {
             if (textPaint.color != color) {
                 textPaint.color = color
             }
+            frameVisible = showFrame
             invalidate()
         }
 
@@ -174,6 +196,14 @@ class LyricOverlayService : Service() {
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
+            if (frameVisible && width > 0 && height > 0) {
+                val insetX = dp(2).toFloat()
+                val insetY = framePaint.strokeWidth / 2f
+                frameRect.set(insetX, insetY, width - insetX, height - insetY)
+                val radius = frameRect.height() / 2f
+                canvas.drawRoundRect(frameRect, radius, radius, frameFillPaint)
+                canvas.drawRoundRect(frameRect, radius, radius, framePaint)
+            }
             if (lyric.isBlank() || width <= horizontalPadding * 2) return
 
             val contentLeft = horizontalPadding.toFloat()
@@ -188,6 +218,7 @@ class LyricOverlayService : Service() {
                 return
             }
 
+            // NetEase-like marquee: short hold, then continuous seamless scroll.
             val cycleDistance = textWidth + repeatGap
             val offset = seamlessScrollOffset(cycleDistance)
             val firstX = contentLeft - offset
@@ -201,8 +232,9 @@ class LyricOverlayService : Service() {
         }
 
         private fun seamlessScrollOffset(distance: Float): Float {
-            val startPauseMs = 900L
-            val scrollDurationMs = ((distance / (32f * density)) * 1000f).roundToInt().coerceAtLeast(2200).toLong()
+            val startPauseMs = 1_000L
+            val pixelsPerSecond = 28f * density
+            val scrollDurationMs = ((distance / pixelsPerSecond) * 1000f).roundToInt().coerceIn(1_800, 8_000).toLong()
             val cycleMs = startPauseMs + scrollDurationMs
             val elapsed = (SystemClock.uptimeMillis() - textChangedAt).floorMod(cycleMs)
             return when {
@@ -239,7 +271,11 @@ class LyricOverlayService : Service() {
         private val density = resources.displayMetrics.density
         private var primaryLyric = " "
         private var secondaryLyric = " "
-        private var progress = 0f
+        private var targetProgress = 0f
+        private var displayProgress = 0f
+        private var isPlaying = false
+        private var lineDurationMs = 4_000L
+        private var lastTargetUptimeMs = 0L
         private var highlightColor = Color.rgb(155, 91, 217)
         private var textSizeSp = 19f
         private var cachedWidth = -1
@@ -265,7 +301,14 @@ class LyricOverlayService : Service() {
             setPadding(dp(18), 0, dp(18), 0)
         }
 
-        fun setLyric(text: String, progress: Float, highlightColor: Int, textSizeSp: Float) {
+        fun setLyric(
+            text: String,
+            progress: Float,
+            highlightColor: Int,
+            textSizeSp: Float,
+            isPlaying: Boolean = false,
+            lineDurationMs: Long = 4_000L
+        ) {
             val lines = text.replace("\r\n", "\n")
                 .replace('\r', '\n')
                 .split('\n')
@@ -275,15 +318,22 @@ class LyricOverlayService : Service() {
             val nextSecondary = lines.getOrNull(1) ?: " "
             val nextProgress = progress.coerceIn(0f, 1f)
             val nextSize = textSizeSp.coerceIn(16f, 34f)
-            val changed = primaryLyric != nextPrimary ||
-                secondaryLyric != nextSecondary ||
+            val nextDuration = lineDurationMs.coerceAtLeast(800L)
+            val lineChanged = primaryLyric != nextPrimary || secondaryLyric != nextSecondary
+            val changed = lineChanged ||
                 this.highlightColor != highlightColor ||
                 this.textSizeSp != nextSize
             primaryLyric = nextPrimary
             secondaryLyric = nextSecondary
-            this.progress = nextProgress
+            this.targetProgress = nextProgress
+            this.isPlaying = isPlaying
+            this.lineDurationMs = nextDuration
             this.highlightColor = highlightColor
             this.textSizeSp = nextSize
+            if (lineChanged || kotlin.math.abs(displayProgress - nextProgress) > 0.22f || !isPlaying) {
+                displayProgress = nextProgress
+            }
+            lastTargetUptimeMs = SystemClock.uptimeMillis()
             if (changed) {
                 cachedWidth = -1
                 requestLayout()
@@ -302,6 +352,7 @@ class LyricOverlayService : Service() {
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
+            advanceDisplayProgress()
             val contentWidth = (width - paddingLeft - paddingRight).coerceAtLeast(1)
             ensureLayouts(contentWidth)
             val primary = primaryBaseLayout ?: return
@@ -317,14 +368,35 @@ class LyricOverlayService : Service() {
             canvas.translate(0f, primary.height + gap)
             secondary.draw(canvas)
             canvas.restoreToCount(checkpoint)
+            if (isPlaying && displayProgress < 0.999f) {
+                postInvalidateOnAnimation()
+            }
+        }
+
+        private fun advanceDisplayProgress() {
+            if (!isPlaying) {
+                displayProgress = targetProgress
+                return
+            }
+            val now = SystemClock.uptimeMillis()
+            val elapsed = if (lastTargetUptimeMs == 0L) {
+                0L
+            } else {
+                (now - lastTargetUptimeMs).coerceAtLeast(0L)
+            }
+            val projected = (
+                targetProgress + elapsed.toFloat() / lineDurationMs.toFloat()
+            ).coerceIn(0f, 1f)
+            // Keep highlight moving every frame; never reverse within the same line.
+            displayProgress = maxOf(displayProgress, projected)
         }
 
         private fun drawHighlight(canvas: Canvas, layout: StaticLayout) {
-            if (progress <= 0f) return
+            if (displayProgress <= 0f) return
             if (layout.lineCount == 0) return
             val line = 0
             val lineWidth = (layout.getLineRight(line) - layout.getLineLeft(line)).coerceAtLeast(1f)
-            val fillWidth = lineWidth * progress.coerceIn(0f, 1f)
+            val fillWidth = lineWidth * displayProgress.coerceIn(0f, 1f)
             val left = layout.getLineLeft(line)
             val top = layout.getLineTop(line).toFloat()
             val bottom = layout.getLineBottom(line).toFloat()
@@ -382,7 +454,9 @@ class LyricOverlayService : Service() {
             text = lastText,
             progress = lastLyricProgress,
             highlightColor = desktopLyricTextColor,
-            textSizeSp = desktopLyricTextSizeSp + if (desktopExpanded) 1.5f else 0f
+            textSizeSp = desktopLyricTextSizeSp + if (desktopExpanded) 1.5f else 0f,
+            isPlaying = lastIsPlaying,
+            lineDurationMs = lastLyricDurationMs
         )
         desktopPlayPauseButton?.icon = if (lastIsPlaying) DesktopIcon.Pause else DesktopIcon.Play
         runCatching { windowManager.updateViewLayout(view, desktopLayoutParams ?: desktopLayoutParams()) }
@@ -427,7 +501,9 @@ class LyricOverlayService : Service() {
                 text = lastText,
                 progress = lastLyricProgress,
                 highlightColor = desktopLyricTextColor,
-                textSizeSp = desktopLyricTextSizeSp + if (desktopExpanded) 1.5f else 0f
+                textSizeSp = desktopLyricTextSizeSp + if (desktopExpanded) 1.5f else 0f,
+                isPlaying = lastIsPlaying,
+                lineDurationMs = lastLyricDurationMs
             )
         }
 
@@ -528,7 +604,9 @@ class LyricOverlayService : Service() {
             text = lastText,
             progress = lastLyricProgress,
             highlightColor = desktopLyricTextColor,
-            textSizeSp = desktopLyricTextSizeSp + if (desktopExpanded) 1.5f else 0f
+            textSizeSp = desktopLyricTextSizeSp + if (desktopExpanded) 1.5f else 0f,
+            isPlaying = lastIsPlaying,
+            lineDurationMs = lastLyricDurationMs
         )
     }
 
@@ -860,17 +938,14 @@ class LyricOverlayService : Service() {
     }
 
     private fun statusBackground(): GradientDrawable =
-        GradientDrawable(
-            GradientDrawable.Orientation.LEFT_RIGHT,
-            if (statusFrameVisible) {
-                intArrayOf(Color.argb(18, 255, 255, 255), Color.argb(92, 0, 0, 0), Color.argb(18, 255, 255, 255))
-            } else {
-                intArrayOf(Color.TRANSPARENT, Color.argb(54, 0, 0, 0), Color.TRANSPARENT)
-            }
-        ).apply {
+        GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
             cornerRadius = dp(999).toFloat()
+            // NetEase: no dark pill while playing — pure transparent; light fill only when adjusting.
             if (statusFrameVisible) {
-                setStroke(dp(1), Color.argb(150, 255, 255, 255))
+                setColor(Color.argb(24, 0, 0, 0))
+            } else {
+                setColor(Color.TRANSPARENT)
             }
         }
 
@@ -907,13 +982,13 @@ class LyricOverlayService : Service() {
         GradientDrawable(
             GradientDrawable.Orientation.TL_BR,
             intArrayOf(
-                Color.argb(146, 18, 20, 24),
-                Color.argb(118, 34, 38, 44),
-                Color.argb(102, 10, 12, 16)
+                Color.argb(168, 16, 18, 22),
+                Color.argb(140, 30, 34, 40),
+                Color.argb(124, 10, 12, 16)
             )
         ).apply {
             cornerRadius = dp(28).toFloat()
-            setStroke(dp(1), Color.argb(34, 255, 255, 255))
+            setStroke(dp(1), Color.argb(72, 255, 255, 255))
         }
 
     private fun desktopTitleText(): String =
@@ -978,6 +1053,7 @@ class LyricOverlayService : Service() {
         private const val EXTRA_ARTIST = "artist"
         private const val EXTRA_IS_PLAYING = "is_playing"
         private const val EXTRA_LYRIC_PROGRESS = "lyric_progress"
+        private const val EXTRA_LYRIC_DURATION_MS = "lyric_duration_ms"
         private const val PLAYBACK_SETTINGS_PREFS = "playback_settings"
         private const val KEY_DESKTOP_LYRIC = "desktop_lyric"
         private const val KEY_DESKTOP_LYRIC_COLOR = "desktop_lyric_color_argb"
@@ -999,7 +1075,8 @@ class LyricOverlayService : Service() {
             title: String = "",
             artist: String = "",
             isPlaying: Boolean = false,
-            lyricProgress: Float = 0f
+            lyricProgress: Float = 0f,
+            lyricDurationMs: Long = 4_000L
         ) {
             val appContext = context.applicationContext
             if ((!statusEnabled && !desktopEnabled) || (text.isBlank() && desktopText.isBlank()) || !canDrawOverlays(appContext)) {
@@ -1021,6 +1098,7 @@ class LyricOverlayService : Service() {
                 putExtra(EXTRA_ARTIST, artist)
                 putExtra(EXTRA_IS_PLAYING, isPlaying)
                 putExtra(EXTRA_LYRIC_PROGRESS, lyricProgress.coerceIn(0f, 1f))
+                putExtra(EXTRA_LYRIC_DURATION_MS, lyricDurationMs.coerceAtLeast(800L))
             }
             runCatching { appContext.startService(intent) }
         }

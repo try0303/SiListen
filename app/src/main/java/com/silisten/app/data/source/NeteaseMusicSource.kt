@@ -422,7 +422,9 @@ class NeteaseMusicSource(
         limit: Int,
         offset: Int
     ): List<Song> = withContext(Dispatchers.IO) {
-        val query = keyword.trim().ifEmpty { "华语流行" }
+        val query = keyword.trim()
+        // Empty keyword is not a real search; never rewrite it to a default catalog term.
+        if (query.isEmpty()) return@withContext emptyList()
         val safeLimit = limit.coerceIn(1, 60)
         val safeOffset = offset.coerceAtLeast(0)
         val cacheKey = "songs:$query:$safeLimit:$safeOffset"
@@ -435,8 +437,10 @@ class NeteaseMusicSource(
             limit = safeLimit,
             offset = safeOffset
         )
-        val ttl = if (songs.isEmpty()) 60_000L else 3 * 60 * 1000L
-        searchCache[cacheKey] = CachedSearch(songs, System.currentTimeMillis() + ttl)
+        // Never cache empty failures — offline/network-blip misses would block real results.
+        if (songs.isNotEmpty()) {
+            searchCache[cacheKey] = CachedSearch(songs, System.currentTimeMillis() + 3 * 60 * 1000L)
+        }
         songs
     }
 
@@ -505,10 +509,13 @@ class NeteaseMusicSource(
         }
 
         val playableUrl = officialStreamUrl(song, quality)
-        streamCache[cacheKey] = CachedStreamUrl(
-            url = playableUrl,
-            expiresAt = System.currentTimeMillis() + 12 * 60 * 1000
-        )
+        // Never cache blank/failed URLs — that freezes "暂时无法播放" for 12 minutes.
+        if (playableUrl.isNotBlank()) {
+            streamCache[cacheKey] = CachedStreamUrl(
+                url = playableUrl,
+                expiresAt = System.currentTimeMillis() + 12 * 60 * 1000
+            )
+        }
         playableUrl
     }
 
@@ -547,7 +554,7 @@ class NeteaseMusicSource(
             apiClient.getJson(
                 "/search?keywords=$encodedQuery&type=1&limit=$limit&offset=$offset&timestamp=${System.currentTimeMillis()}"
             )
-        }.getOrNull() ?: return seedSongs().filterBy(query)
+        }.getOrNull() ?: return emptyList()
 
         val songs = json.optJSONObject("result")?.optJSONArray("songs").orEmpty()
         return buildList {
@@ -571,8 +578,6 @@ class NeteaseMusicSource(
                     )
                 )
             }
-        }.ifEmpty {
-            if (offset == 0) seedSongs().filterBy(query) else emptyList()
         }
     }
 
@@ -584,7 +589,8 @@ class NeteaseMusicSource(
         cachePrefix: String,
         parser: (JSONObject) -> List<MusicPlaylist>
     ): List<MusicPlaylist> {
-        val query = keyword.trim().ifEmpty { "华语流行" }
+        val query = keyword.trim()
+        if (query.isEmpty()) return emptyList()
         val safeLimit = limit.coerceIn(1, 50)
         val safeOffset = offset.coerceAtLeast(0)
         val cacheKey = "$cachePrefix:$query:$safeLimit:$safeOffset"
@@ -598,10 +604,12 @@ class NeteaseMusicSource(
             )
             parser(json)
         }.getOrDefault(emptyList())
-        playlistListCache[cacheKey] = CachedPlaylistList(
-            items,
-            System.currentTimeMillis() + if (items.isEmpty()) 60_000L else 3 * 60 * 1000L
-        )
+        if (items.isNotEmpty()) {
+            playlistListCache[cacheKey] = CachedPlaylistList(
+                items,
+                System.currentTimeMillis() + 3 * 60 * 1000L
+            )
+        }
         return items
     }
 
@@ -660,22 +668,6 @@ class NeteaseMusicSource(
             val json = apiClient.getJson("/song/detail?ids=$joined&timestamp=${System.currentTimeMillis()}")
             json.optJSONArray("songs").orEmpty().toSongs()
         }
-    }
-
-    private fun seedSongs(): List<Song> = listOf(
-        Song("33894312", "起风了", "买辣椒也用券", "起风了", defaultCover, 325_000, info.id),
-        Song("1901371647", "哪里都是你", "队长", "哪里都是你", defaultCover, 222_000, info.id),
-        Song("1827600686", "删了吧", "烟", "删了吧", defaultCover, 221_000, info.id),
-        Song("26259003", "海阔天空", "Beyond", "乐与怒", defaultCover, 326_000, info.id)
-    )
-
-    private fun List<Song>.filterBy(keyword: String): List<Song> {
-        val value = keyword.trim()
-        if (value.isEmpty()) return this
-        return filter {
-            it.title.contains(value, ignoreCase = true) ||
-                it.artist.contains(value, ignoreCase = true)
-        }.ifEmpty { this }
     }
 
     private fun JSONArray.toSongs(): List<Song> {

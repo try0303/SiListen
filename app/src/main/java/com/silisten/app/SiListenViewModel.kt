@@ -50,6 +50,7 @@ import com.silisten.app.playback.PlaybackNotificationBridge
 import com.silisten.app.playback.PlaybackStreamResolver
 import com.silisten.app.playback.PlaybackMode
 import com.silisten.app.playback.PlaybackCache
+import com.silisten.app.playback.SongFileCache
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -236,7 +237,8 @@ private data class LyricOverlaySignature(
     val title: String,
     val artist: String,
     val isPlaying: Boolean,
-    val lyricProgressStep: Int
+    val lyricProgressStep: Int,
+    val lyricDurationMs: Long
 )
 
 class SiListenViewModel(application: Application) : AndroidViewModel(application) {
@@ -263,6 +265,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
     private val musicRepository = MusicRepository(
         registry = MusicSourceRegistry.create(neteaseApiClient) { currentPlaybackQuality() },
         customPlaybackSourceClient = CustomPlaybackSourceClient(application),
+        appContext = application,
         playbackQualityProvider = { currentPlaybackQuality() }
     )
     private val playlistImportRepository = PlaylistImportRepository(musicRepository)
@@ -503,7 +506,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
     }
 
     private fun showStatusBarLyricFramePreview() {
-        statusBarLyricFramePreviewUntil = SystemClock.elapsedRealtime() + 1_200L
+        statusBarLyricFramePreviewUntil = SystemClock.elapsedRealtime() + 2_800L
     }
 
     fun setStatusBarLyricColorArgb(colorArgb: Long) {
@@ -525,7 +528,9 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         uiState = uiState.copy(cacheStats = uiState.cacheStats.copy(loading = true))
         val appContext = getApplication<Application>()
         viewModelScope.launch {
-            val musicBytes = withContext(Dispatchers.IO) { PlaybackCache.sizeBytes(appContext) }
+            val musicBytes = withContext(Dispatchers.IO) {
+                SongFileCache.sizeBytes(appContext) + PlaybackCache.sizeBytes(appContext)
+            }
             val imageBytes = withContext(Dispatchers.IO) { imageCacheRepository.sizeBytes() }
             uiState = uiState.copy(
                 cacheStats = CacheStatsState(
@@ -541,7 +546,10 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         uiState = uiState.copy(cacheStats = uiState.cacheStats.copy(loading = true))
         val appContext = getApplication<Application>()
         viewModelScope.launch {
-            withContext(Dispatchers.IO) { PlaybackCache.clear(appContext) }
+            withContext(Dispatchers.IO) {
+                SongFileCache.clear(appContext)
+                PlaybackCache.clear(appContext)
+            }
             val imageBytes = withContext(Dispatchers.IO) { imageCacheRepository.sizeBytes() }
             uiState = uiState.copy(
                 cacheStats = CacheStatsState(
@@ -559,7 +567,9 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         val appContext = getApplication<Application>()
         viewModelScope.launch {
             withContext(Dispatchers.IO) { imageCacheRepository.clear() }
-            val musicBytes = withContext(Dispatchers.IO) { PlaybackCache.sizeBytes(appContext) }
+            val musicBytes = withContext(Dispatchers.IO) {
+                SongFileCache.sizeBytes(appContext) + PlaybackCache.sizeBytes(appContext)
+            }
             uiState = uiState.copy(
                 cacheStats = CacheStatsState(
                     musicBytes = musicBytes,
@@ -2277,30 +2287,48 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
             ?.trim()
             ?.takeIf { it.isNotBlank() }
             ?.takeIf { it != "歌词加载中..." && it != "暂时没有歌词" }
-        val statusLyricText = activeLyric ?: song.title.ifBlank { song.artist.ifBlank { "SiListen" } }
+        val framePreviewVisible = SystemClock.elapsedRealtime() < statusBarLyricFramePreviewUntil
+        // NetEase-like:
+        // - status bar lyric only while playing (service also enforces this)
+        // - prefer real lyric line; before first line / no lyric, fall back to title for adjust preview only
+        val statusLyricText = when {
+            activeLyric != null -> activeLyric
+            framePreviewVisible -> song.title.ifBlank { song.artist.ifBlank { "SiListen" } }
+            playbackState.isPlaying -> song.title.ifBlank { song.artist.ifBlank { "SiListen" } }
+            else -> ""
+        }
+        val desktopPrimary = activeLyric ?: song.title.ifBlank { song.artist.ifBlank { "SiListen" } }
         val desktopLyricText = listOf(
-            statusLyricText,
+            desktopPrimary,
             nextDesktopLyric ?: " "
         ).joinToString("\n")
-        val lyricProgress = activeLyricLine?.let { line ->
+        val lyricDurationMs = activeLyricLine?.let { line ->
             val nextTime = nextLyricLine?.timeMs ?: (line.timeMs + 4_000L)
-            val duration = (nextTime - line.timeMs).coerceAtLeast(800L)
-            ((playbackState.positionMs - line.timeMs).toFloat() / duration).coerceIn(0f, 1f)
+            (nextTime - line.timeMs).coerceAtLeast(800L)
+        } ?: 4_000L
+        val lyricProgress = activeLyricLine?.let { line ->
+            ((playbackState.positionMs - line.timeMs).toFloat() / lyricDurationMs.toFloat()).coerceIn(0f, 1f)
         } ?: 0f
+        // Hide status overlay content when paused and not adjusting, so service can remove the view.
+        val statusEnabledForOverlay = settings.statusBarLyricEnabled &&
+            (playbackState.isPlaying || framePreviewVisible) &&
+            statusLyricText.isNotBlank()
         val signature = LyricOverlaySignature(
-            statusEnabled = settings.statusBarLyricEnabled,
+            statusEnabled = statusEnabledForOverlay,
             desktopEnabled = settings.desktopLyricEnabled,
             statusOffsetDp = settings.statusBarLyricOffsetDp,
             statusHorizontalPercent = settings.statusBarLyricHorizontalPercent,
             statusWidthPercent = settings.statusBarLyricWidthPercent,
             statusTextColorArgb = settings.statusBarLyricColorArgb,
-            statusFrameVisible = SystemClock.elapsedRealtime() < statusBarLyricFramePreviewUntil,
+            statusFrameVisible = framePreviewVisible,
             text = statusLyricText,
             desktopText = desktopLyricText,
             title = song.title,
             artist = song.artist,
             isPlaying = playbackState.isPlaying,
-            lyricProgressStep = (lyricProgress * 100f).toInt()
+            // Finer step so service still gets fresh progress while DesktopLyricTextView interpolates locally.
+            lyricProgressStep = (lyricProgress * 1000f).toInt(),
+            lyricDurationMs = lyricDurationMs
         )
         if (!lyricOverlayHidden && signature == lastLyricOverlaySignature) return
         lastLyricOverlaySignature = signature
@@ -2319,7 +2347,8 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
             title = signature.title,
             artist = signature.artist,
             isPlaying = signature.isPlaying,
-            lyricProgress = lyricProgress
+            lyricProgress = lyricProgress,
+            lyricDurationMs = lyricDurationMs
         )
     }
 
@@ -2560,7 +2589,7 @@ class SiListenViewModel(application: Application) : AndroidViewModel(application
         const val ARTIST_SONG_PAGE_SIZE = 50
         const val PLAYBACK_LOOP_IDLE_MS = 100L
         const val PLAYBACK_PROGRESS_TICK_MS = 250L
-        const val PLAYBACK_LYRIC_SYNC_INTERVAL_MS = 300L
+        const val PLAYBACK_LYRIC_SYNC_INTERVAL_MS = 180L
         const val PLAYBACK_SLOW_SYNC_INTERVAL_MS = 1_000L
         const val LAST_PLAYBACK_SAVE_INTERVAL_MS = 2_000L
         const val PLAYER_COMMENT_PAGE_SIZE = 30

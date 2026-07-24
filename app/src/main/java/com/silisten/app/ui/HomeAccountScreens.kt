@@ -100,6 +100,8 @@ import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.Phone
+import androidx.compose.material.icons.rounded.QrCode2
 import androidx.compose.material.icons.rounded.Podcasts
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Radio
@@ -658,15 +660,11 @@ fun SearchScreen(
                         } else if (songs.isEmpty()) {
                             item { SearchResultEmptyRow("没有找到单曲", dark) }
                         } else {
-                            itemsIndexed(songs, key = { _, song -> song.id }) { index, song ->
+                            items(songs, key = { song -> song.id }) { song ->
                                 SearchSongResultRow(
-                                    index = index + 1,
                                     song = song,
                                     dark = dark,
-                                    liked = viewModel.isSongLiked(song),
-                                    likeLoading = viewModel.isSongLikeLoading(song),
                                     onClick = { viewModel.playSong(song) },
-                                    onLikeClick = if (song.sourceId != "local") ({ viewModel.toggleSongLike(song) }) else null,
                                     onMoreClick = { actionSong = song }
                                 )
                             }
@@ -985,24 +983,13 @@ private fun MusicPlaylist.searchArtistSubtitle(): String {
 
 @Composable
 private fun SearchSongResultRow(
-    index: Int,
     song: Song,
     dark: Boolean,
-    liked: Boolean,
-    likeLoading: Boolean,
     onClick: () -> Unit,
-    onLikeClick: (() -> Unit)?,
     onMoreClick: () -> Unit
 ) {
     val titleColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
     val mutedText = if (dark) Color.White.copy(alpha = 0.54f) else Color(0xFF676A70)
-    val rankLabel = if (index > 99) "99+" else index.toString()
-    val rankStyle = if (index > 99) MaterialTheme.typography.titleSmall else MaterialTheme.typography.titleLarge
-    val heartTint by animateColorAsState(
-        targetValue = if (liked) Color(0xFFFF5C7C) else mutedText,
-        animationSpec = spring(dampingRatio = 0.72f, stiffness = 520f),
-        label = "search-song-heart"
-    )
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1010,14 +997,6 @@ private fun SearchSongResultRow(
             .padding(vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(
-            text = rankLabel,
-            color = if (index > 99) mutedText else titleColor,
-            style = rankStyle,
-            fontWeight = FontWeight.Bold,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.width(38.dp)
-        )
         AsyncImage(
             model = song.coverUrl,
             contentDescription = song.title,
@@ -1028,7 +1007,7 @@ private fun SearchSongResultRow(
                 .background(Color(0xFF252525))
         )
         Spacer(Modifier.width(14.dp))
-        Column(Modifier.weight(1f)) {
+        Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = song.title,
                 color = titleColor,
@@ -1047,30 +1026,6 @@ private fun SearchSongResultRow(
                 overflow = TextOverflow.Ellipsis
             )
         }
-        if (onLikeClick != null) {
-            Box(
-                modifier = Modifier
-                    .size(38.dp)
-                    .clip(CircleShape)
-                    .noRippleClick(shape = CircleShape, onClick = onLikeClick),
-                contentAlignment = Alignment.Center
-            ) {
-                if (likeLoading) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(15.dp),
-                        strokeWidth = 1.8.dp,
-                        color = heartTint
-                    )
-                } else {
-                    Icon(
-                        Icons.Rounded.Favorite,
-                        contentDescription = "喜欢",
-                        tint = heartTint,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-            }
-        }
         IconButton(
             onClick = onMoreClick,
             modifier = Modifier.size(42.dp)
@@ -1084,6 +1039,7 @@ private fun SearchSongResultRow(
         }
     }
 }
+
 
 @Composable
 private fun SearchCollectionResultRow(
@@ -1429,7 +1385,7 @@ fun SourcesScreen(
     }
 }
 
-private enum class AccountLoginMethod { Qr, Sms }
+private enum class AccountLoginMethod { None, Qr, Sms }
 
 @Composable
 fun AccountScreen(
@@ -1441,7 +1397,19 @@ fun AccountScreen(
     val uiState = viewModel.uiState
     val user = state.loginState.user
     val context = LocalContext.current
-    var loginMethod by remember { mutableStateOf(AccountLoginMethod.Sms) }
+    var loginMethod by remember { mutableStateOf(AccountLoginMethod.None) }
+    LaunchedEffect(loginMethod, state.loginState.loggedIn) {
+        if (!state.loginState.loggedIn &&
+            loginMethod == AccountLoginMethod.Qr &&
+            state.qrLogin.qrImg.isNullOrBlank() &&
+            !state.qrLogin.loading
+        ) {
+            viewModel.createQrLogin()
+        }
+    }
+    BackHandler(enabled = !state.loginState.loggedIn && loginMethod != AccountLoginMethod.None) {
+        loginMethod = AccountLoginMethod.None
+    }
     var showAccountImportDialog by remember { mutableStateOf(false) }
     val dark = uiState.themeSettings.resolveDarkTheme()
     val mutedText = if (dark) Color(0xFFB8C1B9) else Color(0xFF5F6368)
@@ -1471,8 +1439,17 @@ fun AccountScreen(
         ),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        item {
-            PageTopTitle("资料库", dark = dark)
+        if (state.loginState.loggedIn && user != null) {
+            item {
+                PageTopTitle("资料库", dark = dark)
+            }
+        } else {
+            item {
+                AccountBrandHeader(
+                    dark = dark,
+                    accent = MaterialTheme.colorScheme.primary
+                )
+            }
         }
         item {
             AccountSettingsPanel(
@@ -1575,56 +1552,83 @@ fun AccountScreen(
                 }
             }
         } else {
-            item {
-                AccountLoginHeader(
-                    dark = dark,
-                    accent = MaterialTheme.colorScheme.primary,
-                    onOpenNeteaseApp = { openNeteaseCloudMusic(context) }
-                )
-            }
-            item {
-                SmsLoginCard(
-                    phone = state.phone,
-                    captcha = state.captcha,
-                    sendingCode = state.sendingCode,
-                    loggingIn = state.loggingIn,
-                    cooldownSeconds = state.smsCooldownSeconds,
-                    dark = dark,
-                    mutedText = mutedText,
-                    onPhoneChange = viewModel::updatePhone,
-                    onCaptchaChange = viewModel::updateCaptcha,
-                    onSendCode = viewModel::sendSmsCode,
-                    onLogin = viewModel::loginNetease
-                )
-            }
-            item {
-                LoginStatusText(
-                    text = state.loginState.message,
-                    color = warningText,
-                    dark = dark
-                )
-            }
-            item {
-                QrLoginDisclosure(
-                    expanded = loginMethod == AccountLoginMethod.Qr,
-                    dark = dark,
-                    onToggle = {
-                        loginMethod = if (loginMethod == AccountLoginMethod.Qr) {
-                            AccountLoginMethod.Sms
-                        } else {
-                            AccountLoginMethod.Qr
+            when (loginMethod) {
+                AccountLoginMethod.None -> {
+                    item {
+                        AccountLoginMethodChooser(
+                            dark = dark,
+                            onSelectQr = { loginMethod = AccountLoginMethod.Qr },
+                            onSelectSms = { loginMethod = AccountLoginMethod.Sms }
+                        )
+                    }
+                    if (state.loginState.message.isNotBlank()) {
+                        item {
+                            LoginStatusText(
+                                text = state.loginState.message,
+                                color = warningText,
+                                dark = dark
+                            )
                         }
                     }
-                )
-            }
-            item {
-                AnimatedVisibility(visible = loginMethod == AccountLoginMethod.Qr) {
-                    QrLoginCard(
-                        state = state.qrLogin,
-                        dark = dark,
-                        onCreate = viewModel::createQrLogin,
-                        onOpenNeteaseApp = { openNeteaseCloudMusic(context) }
-                    )
+                }
+                AccountLoginMethod.Sms -> {
+                    item {
+                        LoginMethodBackRow(
+                            title = "手机号验证码登录",
+                            dark = dark,
+                            onBack = { loginMethod = AccountLoginMethod.None }
+                        )
+                    }
+                    item {
+                        SmsLoginCard(
+                            phone = state.phone,
+                            captcha = state.captcha,
+                            sendingCode = state.sendingCode,
+                            loggingIn = state.loggingIn,
+                            cooldownSeconds = state.smsCooldownSeconds,
+                            dark = dark,
+                            mutedText = mutedText,
+                            onPhoneChange = viewModel::updatePhone,
+                            onCaptchaChange = viewModel::updateCaptcha,
+                            onSendCode = viewModel::sendSmsCode,
+                            onLogin = viewModel::loginNetease
+                        )
+                    }
+                    item {
+                        LoginStatusText(
+                            text = state.loginState.message,
+                            color = warningText,
+                            dark = dark
+                        )
+                    }
+                }
+                AccountLoginMethod.Qr -> {
+                    item {
+                        LoginMethodBackRow(
+                            title = "二维码登录",
+                            dark = dark,
+                            onBack = { loginMethod = AccountLoginMethod.None }
+                        )
+                    }
+                    item {
+                        QrLoginCard(
+                            state = state.qrLogin,
+                            dark = dark,
+                            onCreate = viewModel::createQrLogin,
+                            onOpenNeteaseApp = { openNeteaseCloudMusic(context) }
+                        )
+                    }
+                    if (state.loginState.message.isNotBlank() &&
+                        state.loginState.message != state.qrLogin.message
+                    ) {
+                        item {
+                            LoginStatusText(
+                                text = state.loginState.message,
+                                color = warningText,
+                                dark = dark
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1876,23 +1880,21 @@ private fun AccountSettingsTile(
 }
 
 @Composable
-private fun AccountLoginHeader(
+private fun AccountBrandHeader(
     dark: Boolean,
-    accent: Color,
-    onOpenNeteaseApp: () -> Unit
+    accent: Color
 ) {
     val titleColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
-    val mutedText = if (dark) Color(0xFFB8C1B9) else Color(0xFF5F6368)
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = 4.dp, bottom = 2.dp),
+            .padding(top = 2.dp, bottom = 2.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Box(
             modifier = Modifier
-                .size(54.dp)
-                .clip(RoundedCornerShape(17.dp))
+                .size(58.dp)
+                .clip(RoundedCornerShape(18.dp))
                 .background(
                     Brush.linearGradient(
                         listOf(
@@ -1907,32 +1909,15 @@ private fun AccountLoginHeader(
                 Icons.Rounded.MusicNote,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.onPrimary,
-                modifier = Modifier.size(28.dp)
+                modifier = Modifier.size(30.dp)
             )
         }
-        Spacer(Modifier.height(14.dp))
+        Spacer(Modifier.height(12.dp))
         Text(
             text = "SiListen",
             color = titleColor,
             style = MaterialTheme.typography.headlineMedium,
             fontWeight = FontWeight.Black
-        )
-        Text(
-            text = "登录网易云音乐，同步你的歌单和推荐",
-            color = mutedText,
-            style = MaterialTheme.typography.bodyMedium,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.padding(top = 4.dp)
-        )
-        Text(
-            text = "打开网易云音乐 App",
-            color = accent,
-            style = MaterialTheme.typography.labelLarge,
-            fontWeight = FontWeight.Black,
-            modifier = Modifier
-                .padding(top = 12.dp)
-                .noRippleClick(shape = RoundedCornerShape(999.dp), onClick = onOpenNeteaseApp)
-                .padding(horizontal = 14.dp, vertical = 8.dp)
         )
     }
 }
@@ -1962,44 +1947,89 @@ private fun LoginStatusText(
 }
 
 @Composable
-private fun QrLoginDisclosure(
-    expanded: Boolean,
+private fun AccountLoginMethodChooser(
     dark: Boolean,
-    onToggle: () -> Unit
+    onSelectQr: () -> Unit,
+    onSelectSms: () -> Unit
 ) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(
+            text = "选择登录方式",
+            color = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111),
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Black
+        )
+        LoginMethodChoiceCard(
+            title = "二维码登录",
+            subtitle = "打开网易云音乐 App 扫码确认",
+            icon = Icons.Rounded.QrCode2,
+            dark = dark,
+            onClick = onSelectQr
+        )
+        LoginMethodChoiceCard(
+            title = "手机号验证码登录",
+            subtitle = "发送短信验证码后登录",
+            icon = Icons.Rounded.Phone,
+            dark = dark,
+            onClick = onSelectSms
+        )
+    }
+}
+
+@Composable
+private fun LoginMethodChoiceCard(
+    title: String,
+    subtitle: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    dark: Boolean,
+    onClick: () -> Unit
+) {
+    val accent = MaterialTheme.colorScheme.primary
     val titleColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
     val mutedText = if (dark) Color(0xFFB8C1B9) else Color(0xFF6E7176)
+    val container = if (dark) Color.White.copy(alpha = 0.07f) else Color.White.copy(alpha = 0.92f)
+    val border = if (dark) {
+        BorderStroke(1.dp, Color.White.copy(alpha = 0.10f))
+    } else {
+        BorderStroke(1.dp, Color(0xFFE9E9ED))
+    }
     Surface(
-        color = if (dark) Color.White.copy(alpha = 0.06f) else Color.White.copy(alpha = 0.82f),
-        border = BorderStroke(1.dp, if (dark) Color.White.copy(alpha = 0.10f) else Color(0xFFE9E9ED)),
-        shape = RoundedCornerShape(22.dp),
+        color = container,
+        border = border,
+        shape = RoundedCornerShape(24.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .noRippleClick(shape = RoundedCornerShape(22.dp), onClick = onToggle)
+            .noRippleClick(shape = RoundedCornerShape(24.dp), onClick = onClick)
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 modifier = Modifier
-                    .size(34.dp)
-                    .clip(RoundedCornerShape(11.dp))
-                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
+                    .size(46.dp)
+                    .clip(RoundedCornerShape(15.dp))
+                    .background(accent.copy(alpha = 0.12f)),
                 contentAlignment = Alignment.Center
             ) {
-                Text("QR", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Black)
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = accent,
+                    modifier = Modifier.size(24.dp)
+                )
             }
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
+            Spacer(Modifier.width(14.dp))
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = if (expanded) "收起二维码登录" else "使用二维码登录",
+                    text = title,
                     color = titleColor,
-                    style = MaterialTheme.typography.titleSmall,
+                    style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Black
                 )
+                Spacer(Modifier.height(3.dp))
                 Text(
-                    text = "如果短信不方便，可以用官方 App 扫码确认",
+                    text = subtitle,
                     color = mutedText,
                     style = MaterialTheme.typography.bodySmall
                 )
@@ -2008,9 +2038,45 @@ private fun QrLoginDisclosure(
                 Icons.Rounded.ChevronRight,
                 contentDescription = null,
                 tint = mutedText,
-                modifier = Modifier.graphicsLayer {
-                    rotationZ = if (expanded) 90f else 0f
-                }
+                modifier = Modifier.size(22.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun LoginMethodBackRow(
+    title: String,
+    dark: Boolean,
+    onBack: () -> Unit
+) {
+    val titleColor = if (dark) Color(0xFFF3FFF5) else Color(0xFF111111)
+    val mutedText = if (dark) Color(0xFFB8C1B9) else Color(0xFF6E7176)
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        IconButton(
+            onClick = onBack,
+            modifier = Modifier.size(42.dp)
+        ) {
+            Icon(
+                imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                contentDescription = "返回",
+                tint = titleColor
+            )
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                color = titleColor,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Black
+            )
+            Text(
+                text = "返回重新选择登录方式",
+                color = mutedText,
+                style = MaterialTheme.typography.bodySmall
             )
         }
     }
@@ -2048,7 +2114,7 @@ private fun SmsLoginCard(
                 fontWeight = FontWeight.Black
             )
             Text(
-                "先发送验证码，再用手机号和验证码登录网易云账号。",
+                "先发送验证码，再用手机号和验证码登录。若提示安全验证，可返回选择二维码登录。",
                 color = mutedText,
                 style = MaterialTheme.typography.bodyMedium
             )
@@ -2499,7 +2565,7 @@ private fun QrLoginCard(
                 onClick = onOpenNeteaseApp
             )
             Text(
-                text = "打开官方 App 后，请回到 SiListen 使用二维码或短信验证码完成登录。",
+                text = "打开官方 App 扫码后，回到 SiListen 等待登录完成。短信登录可点返回切换。",
                 color = mutedText.copy(alpha = 0.82f),
                 style = MaterialTheme.typography.bodySmall
             )
